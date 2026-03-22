@@ -62,6 +62,23 @@ local screen_dirty = true
 local screen_metro
 local particles = {}
 
+-- autopilot (forward declarations — must be before enc/key/redraw)
+autopilot_on = false
+local autopilot_clock_id = nil
+local autopilot_phase = 1
+local autopilot_tick = 0
+local PHASE_NAMES = {"BUILD", "PEAK", "BREAK", "SPACE"}
+local phase_lengths = {16, 8, 12, 10}
+
+-- macro state
+local macro_destroy_val = 0
+local macro_open_val = 0.5
+local drop_active = false
+local drop_saved = {}
+local snapshot = nil
+local k2_held_time = 0
+local k2_down = false
+
 -- clocks
 local seq_clock_id
 local grid_clock_id
@@ -633,8 +650,6 @@ end
 
 ---------- MACRO SNAPSHOTS (saved/recalled by keys) ----------
 
-local snapshot = nil  -- saved param state for K3 recall
-
 local function save_snapshot()
   snapshot = {
     cutoff = params:get("cutoff"),
@@ -701,9 +716,6 @@ local function macro_scramble()
 end
 
 -- DROP: kill melody, keep drums, filter down — for builds
-local drop_active = false
-local drop_saved = {}
-
 local function macro_drop_toggle()
   if not drop_active then
     -- save and kill
@@ -724,10 +736,6 @@ local function macro_drop_toggle()
 end
 
 ---------- ENCODERS & KEYS ----------
-
--- macro state for smooth encoder control
-local macro_destroy_val = 0
-local macro_open_val = 0.5
 
 function enc(n, d)
   if n == 1 then
@@ -805,9 +813,6 @@ function enc(n, d)
   screen_dirty = true
 end
 
-local k2_held_time = 0
-local k2_down = false
-
 function key(n, z)
   if n == 2 then
     if z == 1 then
@@ -883,6 +888,25 @@ function redraw()
       screen.pixel(math.floor(p.x), math.floor(p.y))
       screen.fill()
     end
+  end
+
+  -- AUTOPILOT indicator — visible on ALL pages, top right, pulsing
+  if autopilot_on then
+    local pulse = math.floor(8 + math.sin(util.time() * 4) * 7)
+    screen.level(pulse)
+    screen.font_size(8)
+    screen.move(88, 7)
+    screen.text("AUTO")
+    -- phase indicator bar
+    screen.level(6)
+    local phase_w = math.floor((autopilot_tick / (phase_lengths[autopilot_phase] or 12)) * 38)
+    screen.rect(88, 8, phase_w, 2)
+    screen.fill()
+    -- phase name
+    screen.level(3)
+    screen.font_size(8)
+    screen.move(88, 63)
+    screen.text(PHASE_NAMES[autopilot_phase] or "")
   end
 
   screen.update()
@@ -1130,13 +1154,6 @@ end
 ---------- AUTOPILOT ----------
 -- internal algorithmic brain: evolves melody, timbre, drums, fx over time
 -- cycles through phases: build → peak → deconstruct → minimal → rebuild
-
-autopilot_on = false
-local autopilot_clock_id = nil
-local autopilot_phase = 1  -- 1=build 2=peak 3=deconstruct 4=minimal
-local autopilot_tick = 0
-local PHASE_NAMES = {"BUILD", "PEAK", "BREAK", "SPACE"}
-local phase_lengths = {16, 8, 12, 10}  -- ticks per phase (each tick ~2 beats)
 
 local function autopilot_evolve()
   autopilot_tick = autopilot_tick + 1
