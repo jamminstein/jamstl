@@ -37,26 +37,32 @@ local playing = false
 local current_step = 0
 local current_pattern = 1
 local current_page = 1
-local held_step = 0
+local held_step = 0  -- grid: held step for note assignment
 local euclid_fills = 8
 local euclid_offset = 0
-local euclid_track = 1
-local chaos_held = false
+local euclid_track = 1  -- 1=melody 2=kick 3=hat
+local chaos_held = false  -- grid chaos button state
 
+-- patterns
 local patterns = {}
 
+-- grid
 local g = grid.connect()
 local grid_dirty = true
 
+-- keyboard note map
 local keyboard_notes = {}
 
+-- midi
 local midi_out_device
 local midi_in_device
 
+-- screen
 local screen_dirty = true
 local screen_metro
 local particles = {}
 
+-- clocks
 local seq_clock_id
 local grid_clock_id
 
@@ -111,6 +117,7 @@ local function init_default_patterns()
   for i = 1, NUM_PATTERNS do
     patterns[i] = new_pattern()
   end
+  -- pattern 1: minor pentatonic groove
   local notes = {60, 63, 65, 67, 70, 72, 70, 67, 65, 63, 60, 63, 67, 70, 72, 67}
   local on =    {1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0}
   for i = 1, 16 do
@@ -144,7 +151,7 @@ local function update_keyboard()
   end
 end
 
----------- PARTICLES ----------
+---------- PARTICLES (chaos visualization) ----------
 
 local function update_particles()
   local chaos = params:get("chaos_amt")
@@ -211,30 +218,41 @@ local function advance_step()
   local beat_dur = clock.get_beat_sec() / 4
   local swing = params:get("swing") / 100
 
+  -- melody
   local step = p.melody[current_step]
   if step.on then
     local step_chaos = step.chaos
-    if step_chaos > 0 then
+    local drift = params:get("note_drift")
+    local total_chaos = step_chaos + drift
+    if total_chaos > 0 then
       engine.chaos(params:get("chaos_amt") + step_chaos)
     end
-    if math.random(100) <= step.prob then
-      local note = step.note
+    -- global probability scales per-step probability
+    local effective_prob = step.prob * (params:get("probability") / 100)
+    if math.random(100) <= effective_prob then
+      local note = step.note + (params:get("octave_shift") * 12)
       local vel = step.vel
-      if step_chaos > 0 and math.random() < step_chaos * 0.3 then
+      -- note drift: combined per-step chaos + global drift
+      if total_chaos > 0 and math.random() < total_chaos * 0.4 then
         local scale_notes = musicutil.generate_scale(
-          params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 4)
-        note = snap_to_scale(note + math.random(-3, 3), scale_notes)
+          params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 5)
+        local drift_amt = math.floor(total_chaos * 4)
+        note = snap_to_scale(note + math.random(-drift_amt, drift_amt), scale_notes)
       end
-      if step_chaos > 0 then
-        vel = util.clamp(vel + (math.random() - 0.5) * step_chaos * 0.3, 0.1, 1.0)
+      -- velocity variation
+      if total_chaos > 0 then
+        vel = util.clamp(vel + (math.random() - 0.5) * total_chaos * 0.3, 0.1, 1.0)
       end
-      play_note(note, vel, beat_dur * step.gate * 2)
+      -- global gate length multiplier
+      local gate = beat_dur * step.gate * 2 * params:get("gate_length")
+      play_note(note, vel, gate)
     end
-    if step_chaos > 0 then
+    if total_chaos > 0 then
       engine.chaos(params:get("chaos_amt"))
     end
   end
 
+  -- kick
   if p.kick[current_step] then
     local vel = (current_step % 4 == 1) and 1.0 or 0.75
     engine.kick(vel)
@@ -247,6 +265,7 @@ local function advance_step()
     end
   end
 
+  -- hat
   if p.hat[current_step] then
     local vel = 0.4 + math.random() * 0.2
     engine.hat(vel)
@@ -287,7 +306,7 @@ local function stop_sequencer()
   grid_dirty = true
 end
 
----------- EUCLIDEAN ----------
+---------- APPLY EUCLIDEAN ----------
 
 local function apply_euclidean()
   local p = patterns[current_pattern]
@@ -311,6 +330,7 @@ local function chaos_engage()
   chaos_held = true
   saved_chaos = params:get("chaos_amt")
   params:set("chaos_amt", 1.0)
+  -- randomize some params within musical bounds
   local p = patterns[current_pattern]
   for i = 1, p.length do
     if p.melody[i].on and math.random() < 0.4 then
@@ -332,18 +352,22 @@ g.key = function(x, y, z)
   local p = patterns[current_pattern]
 
   if z == 1 then
+    -- ROW 1: melody step toggles
     if y == 1 and x <= p.length then
       if held_step == 0 then
         p.melody[x].on = not p.melody[x].on
       end
-      held_step = x
+      held_step = x  -- remember for note assignment
 
+    -- ROW 2: kick pattern
     elseif y == 2 and x <= p.length then
       p.kick[x] = not p.kick[x]
 
+    -- ROW 3: hat pattern
     elseif y == 3 and x <= p.length then
       p.hat[x] = not p.hat[x]
 
+    -- ROW 4: per-step chaos (cycle 0 > 0.3 > 0.6 > 1.0)
     elseif y == 4 and x <= p.length then
       local c = p.melody[x].chaos
       if c < 0.1 then c = 0.3
@@ -352,33 +376,43 @@ g.key = function(x, y, z)
       else c = 0 end
       p.melody[x].chaos = c
 
+    -- ROWS 5-7: keyboard
     elseif y >= 5 and y <= 7 then
       if keyboard_notes[y] and keyboard_notes[y][x] then
         local note = keyboard_notes[y][x]
         if held_step > 0 then
+          -- assign note to held step
           p.melody[held_step].note = note
           p.melody[held_step].on = true
         else
+          -- live play
           play_live_note(note, 0.8)
         end
       end
 
+    -- ROW 8: controls
     elseif y == 8 then
       if x >= 1 and x <= 8 then
+        -- pattern select
         current_pattern = x
         update_keyboard()
       elseif x == 10 then
+        -- euclidean track cycle
         euclid_track = (euclid_track % 3) + 1
       elseif x == 11 then
+        -- euclidean fills down
         euclid_fills = math.max(0, euclid_fills - 1)
         apply_euclidean()
       elseif x == 12 then
+        -- euclidean fills up
         euclid_fills = math.min(16, euclid_fills + 1)
         apply_euclidean()
       elseif x == 13 then
+        -- euclidean offset
         euclid_offset = (euclid_offset + 1) % 16
         apply_euclidean()
       elseif x == 14 then
+        -- randomize active step notes (within scale)
         local scale_notes = musicutil.generate_scale(
           params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 3)
         for i = 1, p.length do
@@ -387,13 +421,15 @@ g.key = function(x, y, z)
           end
         end
       elseif x == 15 then
+        -- play/stop
         if playing then stop_sequencer() else start_sequencer() end
       elseif x == 16 then
+        -- CHAOS!
         chaos_engage()
       end
     end
 
-  else
+  else -- z == 0 (release)
     if y == 1 then
       held_step = 0
     elseif y >= 5 and y <= 7 then
@@ -415,6 +451,7 @@ local function grid_redraw()
   g:all(0)
   local p = patterns[current_pattern]
 
+  -- row 1: melody steps
   for x = 1, p.length do
     local brightness = 0
     if x == current_step and playing then
@@ -427,6 +464,7 @@ local function grid_redraw()
     g:led(x, 1, brightness)
   end
 
+  -- row 2: kick
   for x = 1, p.length do
     local b = 2
     if p.kick[x] then b = (x == current_step and playing) and 15 or 10 end
@@ -434,12 +472,14 @@ local function grid_redraw()
     g:led(x, 2, b)
   end
 
+  -- row 3: hat
   for x = 1, p.length do
     local b = 2
     if p.hat[x] then b = (x == current_step and playing) and 15 or 7 end
     g:led(x, 3, b)
   end
 
+  -- row 4: per-step chaos
   for x = 1, p.length do
     local c = p.melody[x].chaos
     local b = 0
@@ -450,15 +490,18 @@ local function grid_redraw()
     g:led(x, 4, b)
   end
 
+  -- rows 5-7: keyboard
   for row = 5, 7 do
     if keyboard_notes[row] then
       for col = 1, 16 do
         if keyboard_notes[row][col] then
           local note = keyboard_notes[row][col]
           local b = 3
+          -- highlight root notes
           if note % 12 == params:get("root_note") % 12 then
             b = 8
           end
+          -- highlight if matches held step's note
           if held_step > 0 and p.melody[held_step].note == note then
             b = 15
           end
@@ -468,16 +511,18 @@ local function grid_redraw()
     end
   end
 
+  -- row 8: controls
   for x = 1, 8 do
     g:led(x, 8, x == current_pattern and 15 or 3)
   end
+  -- euclidean track indicator
   g:led(10, 8, ({8, 10, 6})[euclid_track])
-  g:led(11, 8, 4)
-  g:led(12, 8, 4)
-  g:led(13, 8, 4)
-  g:led(14, 8, 6)
-  g:led(15, 8, playing and 15 or 4)
-  g:led(16, 8, chaos_held and 15 or 8)
+  g:led(11, 8, 4)  -- fills down
+  g:led(12, 8, 4)  -- fills up
+  g:led(13, 8, 4)  -- offset
+  g:led(14, 8, 6)  -- randomize
+  g:led(15, 8, playing and 15 or 4)  -- play/stop
+  g:led(16, 8, chaos_held and 15 or 8)  -- CHAOS!
 
   g:refresh()
 end
@@ -489,13 +534,38 @@ function enc(n, d)
     current_page = util.clamp(current_page + (d > 0 and 1 or -1), 1, 4)
 
   elseif current_page == 1 then
+    -- PLAY page
     if n == 2 then
       params:delta("clock_tempo", d)
     elseif n == 3 then
-      params:delta("swing", d)
+      -- MUTATE: each click evolves the pattern
+      local p = patterns[current_pattern]
+      local scale_notes = musicutil.generate_scale(
+        params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 4)
+      local steps_to_mutate = math.abs(d)
+      for _ = 1, steps_to_mutate do
+        -- pick a random active step
+        local active = {}
+        for i = 1, p.length do
+          if p.melody[i].on then table.insert(active, i) end
+        end
+        if #active > 0 then
+          local idx = active[math.random(#active)]
+          local step = p.melody[idx]
+          -- shift note by 1-3 scale degrees in encoder direction
+          local drift = (d > 0 and 1 or -1) * math.random(1, 3)
+          step.note = snap_to_scale(step.note + drift, scale_notes)
+          -- occasionally flip velocity for accent variation
+          if math.random() < 0.2 then
+            step.vel = util.clamp(step.vel + (math.random() - 0.5) * 0.3, 0.3, 1.0)
+          end
+        end
+      end
+      grid_dirty = true
     end
 
   elseif current_page == 2 then
+    -- SOUND page
     if n == 2 then
       params:delta("cutoff", d)
     elseif n == 3 then
@@ -503,6 +573,7 @@ function enc(n, d)
     end
 
   elseif current_page == 3 then
+    -- CHAOS page
     if n == 2 then
       params:delta("chaos_amt", d)
     elseif n == 3 then
@@ -510,6 +581,7 @@ function enc(n, d)
     end
 
   elseif current_page == 4 then
+    -- FX page
     if n == 2 then
       params:delta("delay_time", d)
     elseif n == 3 then
@@ -525,14 +597,18 @@ function key(n, z)
     if playing then stop_sequencer() else start_sequencer() end
   elseif n == 3 and z == 1 then
     if current_page == 1 then
+      -- cycle wave
       local w = params:get("waveform")
       params:set("waveform", (w % 4) + 1)
     elseif current_page == 2 then
+      -- cycle scale
       local s = params:get("scale_type")
       params:set("scale_type", (s % #SCALE_NAMES) + 1)
     elseif current_page == 3 then
+      -- apply euclidean to melody
       apply_euclidean()
     elseif current_page == 4 then
+      -- toggle delay bits between clean and crunchy
       local b = params:get("delay_bits")
       if b > 10 then params:set("delay_bits", 6)
       else params:set("delay_bits", 16) end
@@ -558,6 +634,7 @@ function redraw()
     draw_fx_page()
   end
 
+  -- chaos particles overlay
   if params:get("chaos_amt") > 0.05 then
     for _, p in ipairs(particles) do
       screen.level(math.floor(p.bright * p.life / 12))
@@ -572,6 +649,7 @@ end
 function draw_play_page()
   local p = patterns[current_pattern]
 
+  -- header
   screen.level(15)
   screen.font_size(8)
   screen.move(0, 7)
@@ -585,6 +663,7 @@ function draw_play_page()
   screen.move(108, 7)
   screen.text("P" .. current_pattern)
 
+  -- step boxes
   for i = 1, p.length do
     local x = (i - 1) * 8
     local y = 12
@@ -615,6 +694,7 @@ function draw_play_page()
     end
   end
 
+  -- kick/hat pattern dots
   for i = 1, p.length do
     local x = (i - 1) * 8 + 3
     if p.kick[i] then
@@ -631,6 +711,7 @@ function draw_play_page()
     end
   end
 
+  -- bottom info
   screen.level(4)
   screen.font_size(8)
   screen.move(0, 44)
@@ -638,8 +719,9 @@ function draw_play_page()
   screen.move(32, 44)
   screen.text(SCALE_DISPLAY[params:get("scale_type")])
   screen.move(56, 44)
-  screen.text("sw:" .. params:get("swing"))
+  screen.text("E3:mutate")
 
+  -- chaos bar
   local chaos = params:get("chaos_amt")
   if chaos > 0 then
     screen.level(chaos_held and 15 or 6)
@@ -705,6 +787,7 @@ function draw_chaos_page()
   screen.text("CHAOS")
 
   local chaos = params:get("chaos_amt")
+  -- chaos amount bar
   screen.level(chaos > 0.5 and 15 or 8)
   screen.rect(48, 2, math.floor(chaos * 78), 5)
   screen.fill()
@@ -718,6 +801,7 @@ function draw_chaos_page()
   screen.move(0, 30)
   screen.text("lfo2 " .. string.format("%.1f", params:get("lfo2_rate")) .. " hz")
 
+  -- lfo waveform visualization
   screen.level(6)
   for i = 0, 60 do
     local lfo1_y = 18 + math.sin(i * 0.2 * params:get("lfo1_rate")) * 3
@@ -732,6 +816,7 @@ function draw_chaos_page()
   end
   screen.fill()
 
+  -- euclidean info
   screen.level(7)
   screen.move(0, 44)
   local track_names = {"melody", "kick", "hat"}
@@ -769,6 +854,7 @@ function draw_fx_page()
   screen.move(80, 40)
   screen.text("sz  " .. string.format("%.2f", params:get("reverb_size")))
 
+  -- delay visualization
   screen.level(3)
   local dt = params:get("delay_time")
   local fb = params:get("delay_fb")
@@ -800,15 +886,20 @@ end
 ---------- INIT ----------
 
 function init()
+  -- init patterns
   init_default_patterns()
 
+  -- MIDI
   midi_out_device = midi.connect(1)
   midi_in_device = midi.connect(1)
   midi_in_device.event = midi_event
 
+  -- ===== PARAMS =====
+
   params:add_separator("JAMSTL")
 
-  params:add_group("SEQUENCE", 5)
+  -- sequence
+  params:add_group("SEQUENCE", 10)
   params:add_number("root_note", "root note", 24, 96, 60)
   params:set_action("root_note", function() update_keyboard() end)
   params:add_option("scale_type", "scale", SCALE_DISPLAY, 1)
@@ -820,7 +911,17 @@ function init()
   params:set_action("pattern_length", function(x)
     patterns[current_pattern].length = x
   end)
+  params:add_control("gate_length", "gate length",
+    controlspec.new(0.1, 2.0, 'lin', 0.01, 1.0, "x"))
+  params:add_number("probability", "probability", 0, 100, 100)
+  params:add_number("octave_shift", "octave shift", -2, 2, 0)
+  params:add_control("note_drift", "note drift",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_control("pan", "pan",
+    controlspec.new(-1, 1, 'lin', 0.01, 0))
+  params:set_action("pan", function(x) engine.pan(x) end)
 
+  -- oscillator
   params:add_group("OSCILLATOR", 6)
   params:add_control("cutoff", "cutoff",
     controlspec.new(20, 18000, 'exp', 0, 2000, "hz"))
@@ -841,6 +942,7 @@ function init()
     controlspec.new(0, 1, 'lin', 0.01, 0))
   params:set_action("noise_amt", function(x) engine.noise_amt(x) end)
 
+  -- bitcrush
   params:add_group("BITCRUSH", 3)
   params:add_control("bit_depth", "bit depth",
     controlspec.new(1, 16, 'lin', 0.5, 12))
@@ -852,6 +954,7 @@ function init()
     controlspec.new(0.01, 0.99, 'lin', 0.01, 0.5))
   params:set_action("pw", function(x) engine.pw(x) end)
 
+  -- envelope
   params:add_group("ENVELOPE", 4)
   params:add_control("env_attack", "attack",
     controlspec.new(0.001, 2, 'exp', 0, 0.005, "s"))
@@ -866,6 +969,7 @@ function init()
     controlspec.new(0.01, 5, 'exp', 0, 0.3, "s"))
   params:set_action("env_release", function(x) engine.release(x) end)
 
+  -- chaos
   params:add_group("CHAOS", 3)
   params:add_control("chaos_amt", "chaos",
     controlspec.new(0, 1, 'lin', 0.01, 0))
@@ -877,6 +981,7 @@ function init()
     controlspec.new(0.01, 20, 'exp', 0.01, 0.3, "hz"))
   params:set_action("lfo2_rate", function(x) engine.lfo2_rate(x) end)
 
+  -- drums
   params:add_group("DRUMS", 3)
   params:add_control("kick_tune", "kick tune",
     controlspec.new(30, 200, 'exp', 1, 60, "hz"))
@@ -888,6 +993,7 @@ function init()
     controlspec.new(0.01, 0.5, 'exp', 0.01, 0.08, "s"))
   params:set_action("hat_decay", function(x) engine.hat_decay(x) end)
 
+  -- fx
   params:add_group("FX", 6)
   params:add_control("delay_time", "delay time",
     controlspec.new(0.01, 1.5, 'exp', 0.01, 0.3, "s"))
@@ -908,12 +1014,15 @@ function init()
     controlspec.new(0, 1, 'lin', 0.01, 0.7))
   params:set_action("reverb_size", function(x) engine.reverb_size(x) end)
 
+  -- midi
   params:add_group("MIDI", 2)
   params:add_number("midi_out_ch", "midi out ch", 0, 16, 0)
   params:add_number("midi_in_ch", "midi in ch", 0, 16, 0)
 
+  -- init keyboard
   update_keyboard()
 
+  -- screen refresh metro
   screen_metro = metro.init()
   screen_metro.event = function()
     update_particles()
@@ -925,6 +1034,7 @@ function init()
   screen_metro.time = 1/15
   screen_metro:start()
 
+  -- grid refresh clock
   grid_clock_id = clock.run(function()
     while true do
       clock.sleep(1/30)
@@ -935,6 +1045,7 @@ function init()
     end
   end)
 
+  -- initial param push to engine
   params:bang()
 end
 

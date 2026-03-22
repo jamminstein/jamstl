@@ -32,6 +32,7 @@ return {
   params = {
     ---------- TIMBRAL (the heart -- filter, bitcrush, FM, noise) ----------
 
+    -- filter: the single most expressive param. robot should LIVE here.
     cutoff = {
       group = "timbral",
       weight = 1.0,
@@ -42,6 +43,7 @@ return {
       euclidean_pulses = 7,
     },
 
+    -- resonance: self-oscillation territory at high values. careful but rewarding.
     res = {
       group = "timbral",
       weight = 0.8,
@@ -52,6 +54,8 @@ return {
       euclidean_pulses = 5,
     },
 
+    -- BIT DEPTH: the bastl bitranger knob. crushing bits = instant character.
+    -- sweep from 16 (clean) down to 4 (destroyed). robot's secret weapon.
     bit_depth = {
       group = "timbral",
       weight = 0.9,
@@ -62,6 +66,7 @@ return {
       euclidean_pulses = 5,
     },
 
+    -- SAMPLE RATE: aliasing city. lower = more artifacts = more bastl.
     sample_rate = {
       group = "timbral",
       weight = 0.7,
@@ -72,6 +77,7 @@ return {
       euclidean_pulses = 9,
     },
 
+    -- FM amount: harmonic complexity. 0=clean, >0.5=metallic, >1=chaos
     fm_amt = {
       group = "timbral",
       weight = 0.7,
@@ -82,6 +88,7 @@ return {
       euclidean_pulses = 5,
     },
 
+    -- FM ratio: harmonic vs inharmonic. integers = tonal, decimals = bell/noise
     fm_ratio = {
       group = "timbral",
       weight = 0.5,
@@ -92,6 +99,7 @@ return {
       euclidean_pulses = 3,
     },
 
+    -- pulse width: only matters on pulse wave but adds subtle movement
     pw = {
       group = "timbral",
       weight = 0.4,
@@ -102,6 +110,7 @@ return {
       euclidean_pulses = 7,
     },
 
+    -- sub oscillator: adds weight and low-end presence
     sub_amt = {
       group = "timbral",
       weight = 0.3,
@@ -112,6 +121,7 @@ return {
       euclidean_pulses = 3,
     },
 
+    -- noise: texture layer. pink noise mixed in.
     noise_amt = {
       group = "timbral",
       weight = 0.3,
@@ -124,6 +134,7 @@ return {
 
     ---------- RHYTHMIC (envelope shape, drum character) ----------
 
+    -- attack: 0.005 = percussive, higher = pads/swells
     env_attack = {
       group = "rhythmic",
       weight = 0.6,
@@ -134,6 +145,7 @@ return {
       euclidean_pulses = 3,
     },
 
+    -- decay: shapes the note body
     env_decay = {
       group = "rhythmic",
       weight = 0.5,
@@ -144,6 +156,7 @@ return {
       euclidean_pulses = 5,
     },
 
+    -- sustain: held level
     env_sustain = {
       group = "rhythmic",
       weight = 0.4,
@@ -154,6 +167,7 @@ return {
       euclidean_pulses = 5,
     },
 
+    -- release: tail length
     env_release = {
       group = "rhythmic",
       weight = 0.5,
@@ -164,6 +178,7 @@ return {
       euclidean_pulses = 3,
     },
 
+    -- kick tuning: shifting the kick fundamental. subtle but felt.
     kick_tune = {
       group = "rhythmic",
       weight = 0.4,
@@ -174,6 +189,7 @@ return {
       euclidean_pulses = 3,
     },
 
+    -- kick decay: tight vs boomy
     kick_decay = {
       group = "rhythmic",
       weight = 0.4,
@@ -184,6 +200,7 @@ return {
       euclidean_pulses = 5,
     },
 
+    -- hat decay: tight tick vs open wash
     hat_decay = {
       group = "rhythmic",
       weight = 0.3,
@@ -196,6 +213,8 @@ return {
 
     ---------- MELODIC (chaos system, LFOs -- the softpop brain) ----------
 
+    -- CHAOS: the master knob. controls how much the LFOs affect everything.
+    -- this is THE param that makes jamstl come alive.
     chaos_amt = {
       group = "melodic",
       weight = 1.0,
@@ -206,6 +225,7 @@ return {
       euclidean_pulses = 7,
     },
 
+    -- LFO1 rate: modulates filter, bitcrush, pan. higher = more frantic.
     lfo1_rate = {
       group = "melodic",
       weight = 0.7,
@@ -216,6 +236,7 @@ return {
       euclidean_pulses = 5,
     },
 
+    -- LFO2 rate: slower modulation layer (triangle wave)
     lfo2_rate = {
       group = "melodic",
       weight = 0.5,
@@ -226,8 +247,80 @@ return {
       euclidean_pulses = 3,
     },
 
+    ---------- PERFORMANCE (robot's expressive controls) ----------
+
+    -- NOTE DRIFT: continuous melodic mutation. robot slowly evolves the melody.
+    -- at 0 notes are fixed. at 1 every step is a new adventure.
+    note_drift = {
+      group = "melodic",
+      weight = 0.8,
+      sensitivity = 0.6,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.7,
+      euclidean_pulses = 5,
+    },
+
+    -- GATE LENGTH: staccato vs legato. multiplier on step gate time.
+    -- 0.2 = tiny blips, 1.0 = normal, 2.0 = overlapping pads
+    gate_length = {
+      group = "rhythmic",
+      weight = 0.7,
+      sensitivity = 0.6,
+      direction = "both",
+      range_lo = 0.15,
+      range_hi = 1.8,
+      euclidean_pulses = 5,
+    },
+
+    -- PROBABILITY: global probability scaler. thins out the pattern.
+    -- 100 = all steps play, 50 = half the steps, 0 = silence
+    probability = {
+      group = "rhythmic",
+      weight = 0.6,
+      sensitivity = 0.5,
+      direction = "both",
+      range_lo = 30,
+      range_hi = 100,
+      euclidean_pulses = 7,
+    },
+
+    -- PAN: stereo position. robot can create spatial movement.
+    pan = {
+      group = "timbral",
+      weight = 0.5,
+      sensitivity = 0.7,
+      direction = "both",
+      range_lo = -0.8,
+      range_hi = 0.8,
+      euclidean_pulses = 7,
+    },
+
+    -- OCTAVE SHIFT: transpose whole sequence. dramatic but musical.
+    octave_shift = {
+      group = "structural",
+      weight = 0.2,
+      sensitivity = 0.2,
+      direction = "both",
+      range_lo = -1,
+      range_hi = 1,
+      euclidean_pulses = 3,
+    },
+
+    -- SWING: groove feel. 0=straight, 80=heavy shuffle
+    swing = {
+      group = "rhythmic",
+      weight = 0.5,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 60,
+      euclidean_pulses = 3,
+    },
+
     ---------- STRUCTURAL (FX -- changes the whole vibe) ----------
 
+    -- delay time: rhythmic character of the space
     delay_time = {
       group = "structural",
       weight = 0.4,
@@ -238,6 +331,7 @@ return {
       euclidean_pulses = 3,
     },
 
+    -- delay feedback: self-oscillation territory. builds and decays.
     delay_fb = {
       group = "structural",
       weight = 0.5,
@@ -248,6 +342,7 @@ return {
       euclidean_pulses = 5,
     },
 
+    -- delay mix: how present the echo is
     delay_mix = {
       group = "structural",
       weight = 0.4,
@@ -258,6 +353,8 @@ return {
       euclidean_pulses = 3,
     },
 
+    -- DELAY BITS: bitcrushing the delay independently. lo-fi dub.
+    -- this is a bastl thyme signature move.
     delay_bits = {
       group = "structural",
       weight = 0.6,
@@ -268,6 +365,7 @@ return {
       euclidean_pulses = 5,
     },
 
+    -- reverb mix: space and depth
     reverb_mix = {
       group = "structural",
       weight = 0.3,
@@ -278,6 +376,7 @@ return {
       euclidean_pulses = 3,
     },
 
+    -- reverb size: intimate vs cavernous
     reverb_size = {
       group = "structural",
       weight = 0.2,
