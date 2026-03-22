@@ -56,6 +56,7 @@ local keyboard_notes = {}
 -- midi
 local midi_out_device
 local midi_in_device
+local opxy_device
 
 -- screen
 local screen_dirty = true
@@ -267,37 +268,69 @@ local function update_particles()
   end
 end
 
+---------- MIDI HELPERS ----------
+
+local function midi_note_on(note, vel_int, ch)
+  if midi_out_device and params:get("midi_out_ch") > 0 then
+    midi_out_device:note_on(note, vel_int, ch or params:get("midi_out_ch"))
+  end
+end
+
+local function midi_note_off(note, ch)
+  if midi_out_device and params:get("midi_out_ch") > 0 then
+    midi_out_device:note_off(note, 0, ch or params:get("midi_out_ch"))
+  end
+end
+
+local function opxy_note_on(note, vel_int, ch)
+  if opxy_device and params:get("opxy_device") > 1 then
+    opxy_device:note_on(note, vel_int, ch)
+  end
+end
+
+local function opxy_note_off(note, ch)
+  if opxy_device and params:get("opxy_device") > 1 then
+    opxy_device:note_off(note, 0, ch)
+  end
+end
+
+local function opxy_cc(cc, val, ch)
+  if opxy_device and params:get("opxy_device") > 1 then
+    opxy_device:cc(cc, val, ch)
+  end
+end
+
 ---------- NOTE PLAYBACK ----------
 
 local function play_note(note, vel, gate_time)
   local freq = musicutil.note_num_to_freq(note)
+  local vel_int = math.floor(vel * 127)
   engine.note_on(note, freq, vel)
-  if midi_out_device and params:get("midi_out_ch") > 0 then
-    local ch = params:get("midi_out_ch")
-    midi_out_device:note_on(note, math.floor(vel * 127), ch)
-  end
+  -- standard MIDI out
+  midi_note_on(note, vel_int)
+  -- OP-XY: melody on dedicated channel
+  local opxy_mel_ch = params:get("opxy_melody_ch")
+  opxy_note_on(note, vel_int, opxy_mel_ch)
   clock.run(function()
     clock.sleep(gate_time)
     engine.note_off(note)
-    if midi_out_device and params:get("midi_out_ch") > 0 then
-      midi_out_device:note_off(note, 0, params:get("midi_out_ch"))
-    end
+    midi_note_off(note)
+    opxy_note_off(note, opxy_mel_ch)
   end)
 end
 
 local function play_live_note(note, vel)
   local freq = musicutil.note_num_to_freq(note)
+  local vel_int = math.floor(vel * 127)
   engine.note_on(note, freq, vel)
-  if midi_out_device and params:get("midi_out_ch") > 0 then
-    midi_out_device:note_on(note, math.floor(vel * 127), params:get("midi_out_ch"))
-  end
+  midi_note_on(note, vel_int)
+  opxy_note_on(note, vel_int, params:get("opxy_melody_ch"))
 end
 
 local function stop_live_note(note)
   engine.note_off(note)
-  if midi_out_device and params:get("midi_out_ch") > 0 then
-    midi_out_device:note_off(note, 0, params:get("midi_out_ch"))
-  end
+  midi_note_off(note)
+  opxy_note_off(note, params:get("opxy_melody_ch"))
 end
 
 ---------- SEQUENCER ----------
@@ -357,14 +390,17 @@ local function advance_step()
     if not p.kick[current_step] then vel = vel * 0.4 end
     -- velocity humanize
     vel = util.clamp(vel + (math.random() - 0.5) * 0.15, 0.2, 1.0)
+    local vel_int = math.floor(vel * 127)
     engine.kick(vel)
-    if midi_out_device and params:get("midi_out_ch") > 0 then
-      midi_out_device:note_on(36, math.floor(vel * 127), params:get("midi_out_ch"))
-      clock.run(function()
-        clock.sleep(0.05)
-        midi_out_device:note_off(36, 0, params:get("midi_out_ch"))
-      end)
-    end
+    midi_note_on(36, vel_int)
+    -- OP-XY: kick on drum channel
+    local opxy_drum_ch = params:get("opxy_drum_ch")
+    opxy_note_on(36, vel_int, opxy_drum_ch)
+    clock.run(function()
+      clock.sleep(0.05)
+      midi_note_off(36)
+      opxy_note_off(36, opxy_drum_ch)
+    end)
   end
 
   -- hat (with probability + ghost notes + open/closed variation)
@@ -385,14 +421,17 @@ local function advance_step()
       engine.hat_decay(base_decay * (0.5 + math.random() * 2.0))
     end
     vel = util.clamp(vel + (math.random() - 0.5) * 0.12, 0.15, 0.8)
-    engine.hat(vel)
-    if midi_out_device and params:get("midi_out_ch") > 0 then
-      midi_out_device:note_on(42, math.floor(vel * 127), params:get("midi_out_ch"))
-      clock.run(function()
-        clock.sleep(0.05)
-        midi_out_device:note_off(42, 0, params:get("midi_out_ch"))
-      end)
-    end
+    local vel_int = math.floor(vel * 127)
+    engine.hat(vel_int > 50 and vel or 0.4)  -- ensure audible
+    midi_note_on(42, vel_int)
+    -- OP-XY: hat on drum channel
+    local opxy_drum_ch = params:get("opxy_drum_ch")
+    opxy_note_on(42, vel_int, opxy_drum_ch)
+    clock.run(function()
+      clock.sleep(0.05)
+      midi_note_off(42)
+      opxy_note_off(42, opxy_drum_ch)
+    end)
     -- restore hat decay if we varied it
     if hat_var > 0 then
       engine.hat_decay(params:get("hat_decay"))
@@ -1307,6 +1346,45 @@ local function stop_autopilot()
   end
 end
 
+---------- OP-XY CC SYNC ----------
+-- sends CC for key params so OP-XY display reflects state
+-- CC mapping: 1=cutoff, 2=res, 3=chaos, 4=bitdepth, 5=gate, 7=volume(hat_density)
+
+local last_opxy_cc = {}
+
+local function opxy_sync_params()
+  if not opxy_device or params:get("opxy_device") <= 1 then return end
+  local opxy_mel_ch = params:get("opxy_melody_ch")
+
+  -- cutoff: 20-18000 -> 0-127
+  local cut_cc = math.floor(util.clamp((params:get("cutoff") - 20) / 17980 * 127, 0, 127))
+  if cut_cc ~= last_opxy_cc[1] then
+    opxy_cc(74, cut_cc, opxy_mel_ch)  -- CC74 = brightness (filter cutoff standard)
+    last_opxy_cc[1] = cut_cc
+  end
+
+  -- chaos: 0-1 -> 0-127
+  local chaos_cc = math.floor(params:get("chaos_amt") * 127)
+  if chaos_cc ~= last_opxy_cc[3] then
+    opxy_cc(1, chaos_cc, opxy_mel_ch)  -- CC1 = mod wheel
+    last_opxy_cc[3] = chaos_cc
+  end
+
+  -- bit depth: 1-16 -> 127-0 (inverted: low bits = high CC)
+  local bit_cc = math.floor((1 - (params:get("bit_depth") - 1) / 15) * 127)
+  if bit_cc ~= last_opxy_cc[4] then
+    opxy_cc(18, bit_cc, opxy_mel_ch)  -- CC18
+    last_opxy_cc[4] = bit_cc
+  end
+
+  -- gate length: 0.1-2.0 -> 0-127
+  local gate_cc = math.floor(util.clamp((params:get("gate_length") - 0.1) / 1.9 * 127, 0, 127))
+  if gate_cc ~= last_opxy_cc[5] then
+    opxy_cc(73, gate_cc, opxy_mel_ch)  -- CC73 = attack time (close enough)
+    last_opxy_cc[5] = gate_cc
+  end
+end
+
 ---------- MIDI IN ----------
 
 local function midi_event(data)
@@ -1319,6 +1397,19 @@ local function midi_event(data)
     play_live_note(msg.note, msg.vel / 127)
   elseif msg.type == "note_off" or (msg.type == "note_on" and msg.vel == 0) then
     stop_live_note(msg.note)
+  elseif msg.type == "cc" then
+    -- CC input: map common CCs to params
+    if msg.cc == 74 then  -- filter cutoff
+      params:set("cutoff", 20 + (msg.val / 127) * 17980)
+    elseif msg.cc == 1 then  -- mod wheel -> chaos
+      params:set("chaos_amt", msg.val / 127)
+    elseif msg.cc == 71 then  -- resonance
+      params:set("res", (msg.val / 127) * 3.5)
+    elseif msg.cc == 73 then  -- attack -> gate length
+      params:set("gate_length", 0.1 + (msg.val / 127) * 1.9)
+    elseif msg.cc == 18 then  -- CC18 -> bit depth
+      params:set("bit_depth", 16 - (msg.val / 127) * 15)
+    end
   end
 end
 
@@ -1462,9 +1553,26 @@ function init()
   params:set_action("reverb_size", function(x) engine.reverb_size(x) end)
 
   -- midi
-  params:add_group("MIDI", 2)
+  params:add_group("MIDI", 7)
   params:add_number("midi_out_ch", "midi out ch", 0, 16, 0)
   params:add_number("midi_in_ch", "midi in ch", 0, 16, 0)
+
+  -- OP-XY dedicated output
+  local midi_devices = {"none"}
+  for i = 1, #midi.vports do
+    local name = midi.vports[i].name or ("port " .. i)
+    table.insert(midi_devices, i .. ": " .. name)
+  end
+  params:add_option("opxy_device", "OP-XY device", midi_devices, 1)
+  params:set_action("opxy_device", function(x)
+    if x > 1 then
+      opxy_device = midi.connect(x - 1)
+    else
+      opxy_device = nil
+    end
+  end)
+  params:add_number("opxy_melody_ch", "OP-XY melody ch", 1, 16, 1)
+  params:add_number("opxy_drum_ch", "OP-XY drum ch", 1, 16, 10)
 
   -- init keyboard
   update_keyboard()
@@ -1473,6 +1581,7 @@ function init()
   screen_metro = metro.init()
   screen_metro.event = function()
     update_particles()
+    opxy_sync_params()  -- keep OP-XY CCs in sync
     if screen_dirty then
       redraw()
       screen_dirty = false
@@ -1506,6 +1615,14 @@ function cleanup()
   if midi_out_device then
     for note = 0, 127 do
       midi_out_device:note_off(note, 0, 1)
+    end
+  end
+  -- OP-XY cleanup
+  if opxy_device then
+    for ch = 1, 16 do
+      for note = 0, 127 do
+        opxy_device:note_off(note, 0, ch)
+      end
     end
   end
 end
