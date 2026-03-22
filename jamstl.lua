@@ -631,24 +631,118 @@ local function grid_redraw()
   g:refresh()
 end
 
+---------- MACRO SNAPSHOTS (saved/recalled by keys) ----------
+
+local snapshot = nil  -- saved param state for K3 recall
+
+local function save_snapshot()
+  snapshot = {
+    cutoff = params:get("cutoff"),
+    res = params:get("res"),
+    bit_depth = params:get("bit_depth"),
+    sample_rate = params:get("sample_rate"),
+    fm_amt = params:get("fm_amt"),
+    chaos_amt = params:get("chaos_amt"),
+    delay_mix = params:get("delay_mix"),
+    delay_fb = params:get("delay_fb"),
+    gate_length = params:get("gate_length"),
+    kick_density = params:get("kick_density"),
+    hat_density = params:get("hat_density"),
+    hat_variety = params:get("hat_variety"),
+  }
+end
+
+local function recall_snapshot()
+  if not snapshot then return end
+  for k, v in pairs(snapshot) do
+    params:set(k, v)
+  end
+end
+
+---------- MACRO FUNCTIONS ----------
+
+-- DESTROY: bitcrush + resonance spike + delay feedback surge
+local function macro_destroy(amount)
+  local amt = util.clamp(amount, 0, 1)
+  params:set("bit_depth", util.clamp(16 - amt * 13, 3, 16))
+  params:set("sample_rate", util.clamp(40000 - amt * 36000, 2000, 40000))
+  params:set("res", util.clamp(0.3 + amt * 2.5, 0.3, 3.0))
+  params:set("delay_fb", util.clamp(0.4 + amt * 0.45, 0.4, 0.85))
+end
+
+-- OPEN: filter sweep + FM + reverb bloom
+local function macro_open(amount)
+  local amt = util.clamp(amount, 0, 1)
+  params:set("cutoff", 200 + amt * 11800)
+  params:set("fm_amt", amt * 0.8)
+  params:set("reverb_mix", amt * 0.5)
+  params:set("reverb_size", 0.3 + amt * 0.6)
+  params:set("gate_length", 0.5 + amt * 1.2)
+end
+
+-- SCRAMBLE: randomize drum pattern + melody notes in scale
+local function macro_scramble()
+  local p = patterns[current_pattern]
+  local scale_notes = musicutil.generate_scale(
+    params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 4)
+  -- scramble melody notes
+  for i = 1, p.length do
+    if p.melody[i].on then
+      p.melody[i].note = scale_notes[math.random(#scale_notes)]
+      p.melody[i].vel = 0.4 + math.random() * 0.6
+    end
+  end
+  -- scramble drums with probability
+  for i = 1, p.length do
+    if math.random() < 0.4 then p.kick[i] = not p.kick[i] end
+    if math.random() < 0.5 then p.hat[i] = not p.hat[i] end
+  end
+  grid_dirty = true
+end
+
+-- DROP: kill melody, keep drums, filter down — for builds
+local drop_active = false
+local drop_saved = {}
+
+local function macro_drop_toggle()
+  if not drop_active then
+    -- save and kill
+    drop_active = true
+    drop_saved.cutoff = params:get("cutoff")
+    drop_saved.probability = params:get("probability")
+    drop_saved.delay_mix = params:get("delay_mix")
+    params:set("cutoff", 300)
+    params:set("probability", 20)
+    params:set("delay_mix", 0.6)
+  else
+    -- restore with a bump
+    drop_active = false
+    params:set("cutoff", drop_saved.cutoff or 2000)
+    params:set("probability", drop_saved.probability or 100)
+    params:set("delay_mix", drop_saved.delay_mix or 0.2)
+  end
+end
+
 ---------- ENCODERS & KEYS ----------
+
+-- macro state for smooth encoder control
+local macro_destroy_val = 0
+local macro_open_val = 0.5
 
 function enc(n, d)
   if n == 1 then
     current_page = util.clamp(current_page + (d > 0 and 1 or -1), 1, 4)
 
   elseif current_page == 1 then
-    -- PLAY page
+    -- PLAY: E2 = tempo, E3 = MUTATE melody
     if n == 2 then
       params:delta("clock_tempo", d)
     elseif n == 3 then
-      -- MUTATE: each click evolves the pattern
       local p = patterns[current_pattern]
       local scale_notes = musicutil.generate_scale(
         params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 4)
       local steps_to_mutate = math.abs(d)
       for _ = 1, steps_to_mutate do
-        -- pick a random active step
         local active = {}
         for i = 1, p.length do
           if p.melody[i].on then table.insert(active, i) end
@@ -656,12 +750,17 @@ function enc(n, d)
         if #active > 0 then
           local idx = active[math.random(#active)]
           local step = p.melody[idx]
-          -- shift note by 1-3 scale degrees in encoder direction
           local drift = (d > 0 and 1 or -1) * math.random(1, 3)
           step.note = snap_to_scale(step.note + drift, scale_notes)
-          -- occasionally flip velocity for accent variation
-          if math.random() < 0.2 then
+          if math.random() < 0.3 then
             step.vel = util.clamp(step.vel + (math.random() - 0.5) * 0.3, 0.3, 1.0)
+          end
+          -- occasionally mutate a drum hit too
+          if math.random() < 0.15 then
+            p.kick[idx] = not p.kick[idx]
+          end
+          if math.random() < 0.2 then
+            p.hat[idx] = not p.hat[idx]
           end
         end
       end
@@ -669,53 +768,92 @@ function enc(n, d)
     end
 
   elseif current_page == 2 then
-    -- SOUND page
+    -- SOUND: E2 = DESTROY macro (bitcrush+res+feedback), E3 = OPEN macro (filter+fm+reverb)
     if n == 2 then
-      params:delta("cutoff", d)
+      macro_destroy_val = util.clamp(macro_destroy_val + d * 0.03, 0, 1)
+      macro_destroy(macro_destroy_val)
     elseif n == 3 then
-      params:delta("res", d)
+      macro_open_val = util.clamp(macro_open_val + d * 0.03, 0, 1)
+      macro_open(macro_open_val)
     end
 
   elseif current_page == 3 then
-    -- CHAOS page
+    -- CHAOS: E2 = chaos amount, E3 = drum density (ghost fills)
     if n == 2 then
       params:delta("chaos_amt", d)
     elseif n == 3 then
-      params:delta("lfo1_rate", d)
+      -- move kick+hat density together
+      local kd = util.clamp(params:get("kick_density") + d * 0.03, 0, 1)
+      local hd = util.clamp(params:get("hat_density") + d * 0.03, 0, 1)
+      params:set("kick_density", kd)
+      params:set("hat_density", hd)
+      params:set("hat_variety", hd * 0.8)
     end
 
   elseif current_page == 4 then
-    -- FX page
+    -- FX: E2 = delay time, E3 = delay feedback + bits together
     if n == 2 then
       params:delta("delay_time", d)
     elseif n == 3 then
-      params:delta("delay_mix", d)
+      params:delta("delay_fb", d)
+      -- bits follow feedback inversely — more feedback = crunchier
+      local fb = params:get("delay_fb")
+      params:set("delay_bits", util.clamp(16 - fb * 12, 4, 16))
     end
   end
 
   screen_dirty = true
 end
 
+local k2_held_time = 0
+local k2_down = false
+
 function key(n, z)
-  if n == 2 and z == 1 then
-    if playing then stop_sequencer() else start_sequencer() end
+  if n == 2 then
+    if z == 1 then
+      k2_down = true
+      k2_held_time = util.time()
+    else
+      k2_down = false
+      local held = util.time() - k2_held_time
+      if held > 0.5 then
+        -- LONG PRESS: toggle autopilot
+        if autopilot_on then stop_autopilot() else start_autopilot() end
+      else
+        -- SHORT PRESS: play/stop
+        if playing then stop_sequencer() else start_sequencer() end
+      end
+    end
+
   elseif n == 3 and z == 1 then
     if current_page == 1 then
-      -- cycle wave
+      -- SCRAMBLE: randomize pattern (melody notes + drum hits)
+      save_snapshot()
+      macro_scramble()
+
+    elseif current_page == 2 then
+      -- WAVE MORPH: cycle waveform + randomize FM ratio for surprise
       local w = params:get("waveform")
       params:set("waveform", (w % 4) + 1)
-    elseif current_page == 2 then
-      -- cycle scale
-      local s = params:get("scale_type")
-      params:set("scale_type", (s % #SCALE_NAMES) + 1)
+      params:set("fm_ratio", 0.5 + math.random() * 5.5)
+      params:set("pw", 0.1 + math.random() * 0.8)
+
     elseif current_page == 3 then
-      -- apply euclidean to melody
-      apply_euclidean()
+      -- DROP/BUILD: toggle breakdown mode
+      macro_drop_toggle()
+
     elseif current_page == 4 then
-      -- toggle delay bits between clean and crunchy
-      local b = params:get("delay_bits")
-      if b > 10 then params:set("delay_bits", 6)
-      else params:set("delay_bits", 16) end
+      -- TAPE STOP: crank bits down, slow delay, high feedback — then release
+      if params:get("delay_bits") > 6 then
+        save_snapshot()
+        params:set("delay_bits", 3)
+        params:set("delay_fb", 0.85)
+        params:set("delay_time", 0.8)
+        params:set("bit_depth", 4)
+        params:set("sample_rate", 3000)
+      else
+        recall_snapshot()
+      end
     end
   end
   screen_dirty = true
@@ -822,8 +960,8 @@ function draw_play_page()
   screen.text(WAVE_NAMES[params:get("waveform")])
   screen.move(32, 44)
   screen.text(SCALE_DISPLAY[params:get("scale_type")])
-  screen.move(56, 44)
-  screen.text("E3:mutate")
+  screen.move(64, 44)
+  screen.text(autopilot_on and "AUTO" or "E3:mutate")
 
   -- chaos bar
   local chaos = params:get("chaos_amt")
@@ -835,6 +973,18 @@ function draw_play_page()
     screen.rect(36, 47, math.floor(chaos * 90), 4)
     screen.fill()
   end
+
+  -- drop indicator
+  if drop_active then
+    screen.level(15)
+    screen.move(0, 62)
+    screen.text(">> DROP <<")
+  end
+
+  -- K3 hint
+  screen.level(3)
+  screen.move(90, 62)
+  screen.text("K3:scram")
 end
 
 function draw_sound_page()
@@ -846,38 +996,33 @@ function draw_sound_page()
   screen.move(48, 7)
   screen.text(WAVE_NAMES[params:get("waveform")])
 
-  screen.level(7)
-  screen.font_size(8)
-  local y = 18
-  screen.move(0, y)
-  screen.text("cut " .. string.format("%.0f", params:get("cutoff")))
-  screen.move(70, y)
-  screen.text("res " .. string.format("%.2f", params:get("res")))
+  -- DESTROY macro bar
+  screen.level(macro_destroy_val > 0.5 and 15 or 7)
+  screen.move(0, 18)
+  screen.text("DESTROY")
+  screen.level(macro_destroy_val > 0.3 and 12 or 4)
+  screen.rect(0, 20, math.floor(macro_destroy_val * 128), 4)
+  screen.fill()
 
-  y = 28
-  screen.move(0, y)
-  screen.text("bits " .. string.format("%.0f", params:get("bit_depth")))
-  screen.move(70, y)
-  screen.text("sr " .. string.format("%.0f", params:get("sample_rate") / 1000) .. "k")
+  -- OPEN macro bar
+  screen.level(macro_open_val > 0.5 and 15 or 7)
+  screen.move(0, 32)
+  screen.text("OPEN")
+  screen.level(macro_open_val > 0.3 and 12 or 4)
+  screen.rect(0, 34, math.floor(macro_open_val * 128), 4)
+  screen.fill()
 
-  y = 38
-  screen.move(0, y)
-  screen.text("fm " .. string.format("%.2f", params:get("fm_amt")))
-  screen.move(70, y)
-  screen.text("rat " .. string.format("%.1f", params:get("fm_ratio")))
-
-  y = 48
-  screen.move(0, y)
-  screen.text("sub " .. string.format("%.2f", params:get("sub_amt")))
-  screen.move(70, y)
-  screen.text("nse " .. string.format("%.2f", params:get("noise_amt")))
-
-  y = 58
+  -- current values
   screen.level(4)
-  screen.move(0, y)
-  screen.text("a" .. string.format("%.2f", params:get("env_attack")))
-  screen.move(32, y)
-  screen.text("d" .. string.format("%.2f", params:get("env_decay")))
+  screen.font_size(8)
+  screen.move(0, 48)
+  screen.text("bits:" .. string.format("%.0f", params:get("bit_depth")))
+  screen.move(44, 48)
+  screen.text("cut:" .. string.format("%.0f", params:get("cutoff")))
+  screen.move(0, 58)
+  screen.text("fm:" .. string.format("%.2f", params:get("fm_amt")))
+  screen.move(44, 58)
+  screen.text("res:" .. string.format("%.1f", params:get("res")))
   screen.move(64, y)
   screen.text("s" .. string.format("%.1f", params:get("env_sustain")))
   screen.move(96, y)
@@ -920,17 +1065,27 @@ function draw_chaos_page()
   end
   screen.fill()
 
-  -- euclidean info
+  -- drum density
   screen.level(7)
   screen.move(0, 44)
-  local track_names = {"melody", "kick", "hat"}
-  screen.text("euclid: " .. track_names[euclid_track])
-  screen.move(0, 54)
-  screen.text("fills:" .. euclid_fills .. " off:" .. euclid_offset)
-
+  screen.text("E3:drums")
+  local kd = params:get("kick_density")
+  local hd = params:get("hat_density")
   screen.level(4)
-  screen.move(0, 63)
-  screen.text("K3: apply euclidean")
+  screen.move(60, 44)
+  screen.text("k:" .. string.format("%.0f", kd * 100) .. "% h:" .. string.format("%.0f", hd * 100) .. "%")
+
+  -- drop/build indicator
+  screen.level(drop_active and 15 or 3)
+  screen.move(0, 56)
+  screen.text(drop_active and "K3: RELEASE!" or "K3: drop")
+
+  -- autopilot
+  if autopilot_on then
+    screen.level(15)
+    screen.move(80, 56)
+    screen.text("AUTO")
+  end
 end
 
 function draw_fx_page()
@@ -969,6 +1124,169 @@ function draw_fx_page()
       screen.rect(x, 58 - h, 2, h)
       screen.fill()
     end
+  end
+end
+
+---------- AUTOPILOT ----------
+-- internal algorithmic brain: evolves melody, timbre, drums, fx over time
+-- cycles through phases: build → peak → deconstruct → minimal → rebuild
+
+autopilot_on = false
+local autopilot_clock_id = nil
+local autopilot_phase = 1  -- 1=build 2=peak 3=deconstruct 4=minimal
+local autopilot_tick = 0
+local PHASE_NAMES = {"BUILD", "PEAK", "BREAK", "SPACE"}
+local phase_lengths = {16, 8, 12, 10}  -- ticks per phase (each tick ~2 beats)
+
+local function autopilot_evolve()
+  autopilot_tick = autopilot_tick + 1
+  local p = patterns[current_pattern]
+  local scale_notes = musicutil.generate_scale(
+    params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 4)
+  local phase = autopilot_phase
+  local progress = autopilot_tick / phase_lengths[phase]
+
+  if phase == 1 then
+    -- BUILD: gradually add density, open filter, increase chaos
+    -- mutate 1-2 melody notes upward
+    for _ = 1, math.random(1, 2) do
+      local active = {}
+      for i = 1, p.length do
+        if p.melody[i].on then table.insert(active, i) end
+      end
+      if #active > 0 then
+        local idx = active[math.random(#active)]
+        p.melody[idx].note = snap_to_scale(p.melody[idx].note + math.random(1, 3), scale_notes)
+      end
+    end
+    -- occasionally activate a new step
+    if math.random() < 0.25 then
+      local off = {}
+      for i = 1, p.length do
+        if not p.melody[i].on then table.insert(off, i) end
+      end
+      if #off > 0 then
+        local idx = off[math.random(#off)]
+        p.melody[idx].on = true
+        p.melody[idx].note = scale_notes[math.random(#scale_notes)]
+        p.melody[idx].vel = 0.5 + math.random() * 0.4
+      end
+    end
+    -- add hat fills
+    if math.random() < 0.3 then
+      local i = math.random(1, p.length)
+      p.hat[i] = true
+    end
+    -- open up sound
+    params:set("cutoff", util.clamp(params:get("cutoff") + 200 + math.random(200), 200, 12000))
+    params:set("chaos_amt", util.clamp(params:get("chaos_amt") + 0.03, 0, 0.7))
+    params:set("hat_density", util.clamp(params:get("hat_density") + 0.04, 0, 0.7))
+
+  elseif phase == 2 then
+    -- PEAK: high energy, glitch moments, waveform surprises
+    -- random timbre jolts
+    if math.random() < 0.4 then
+      params:set("bit_depth", 3 + math.random(10))
+      params:set("fm_amt", math.random() * 1.2)
+    end
+    -- velocity accents
+    for i = 1, p.length do
+      if p.melody[i].on and math.random() < 0.2 then
+        p.melody[i].vel = 0.8 + math.random() * 0.2
+      end
+    end
+    -- drum mutation
+    if math.random() < 0.3 then
+      local i = math.random(1, p.length)
+      p.kick[i] = not p.kick[i]
+    end
+    -- occasional waveform switch
+    if math.random() < 0.15 then
+      params:set("waveform", math.random(1, 4))
+    end
+
+  elseif phase == 3 then
+    -- DECONSTRUCT: thin out, lower filter, increase delay
+    -- remove notes
+    if math.random() < 0.35 then
+      local active = {}
+      for i = 1, p.length do
+        if p.melody[i].on then table.insert(active, i) end
+      end
+      if #active > 2 then  -- keep at least 2
+        local idx = active[math.random(#active)]
+        p.melody[idx].on = false
+      end
+    end
+    -- close filter
+    params:set("cutoff", util.clamp(params:get("cutoff") - 300, 300, 12000))
+    -- more delay/reverb
+    params:set("delay_mix", util.clamp(params:get("delay_mix") + 0.04, 0, 0.6))
+    params:set("delay_fb", util.clamp(params:get("delay_fb") + 0.03, 0.2, 0.8))
+    -- thin drums
+    if math.random() < 0.25 then
+      local i = math.random(1, p.length)
+      p.hat[i] = false
+    end
+    params:set("hat_density", util.clamp(params:get("hat_density") - 0.05, 0, 0.7))
+
+  elseif phase == 4 then
+    -- MINIMAL/SPACE: sparse, deep, breathing room
+    -- drift notes downward slowly
+    for _ = 1, 1 do
+      local active = {}
+      for i = 1, p.length do
+        if p.melody[i].on then table.insert(active, i) end
+      end
+      if #active > 0 then
+        local idx = active[math.random(#active)]
+        p.melody[idx].note = snap_to_scale(p.melody[idx].note - math.random(1, 2), scale_notes)
+      end
+    end
+    -- clean up sound
+    params:set("bit_depth", util.clamp(params:get("bit_depth") + 1, 8, 16))
+    params:set("fm_amt", util.clamp(params:get("fm_amt") - 0.05, 0, 2))
+    params:set("chaos_amt", util.clamp(params:get("chaos_amt") - 0.04, 0, 1))
+    params:set("delay_mix", util.clamp(params:get("delay_mix") - 0.02, 0.05, 0.6))
+    -- kick pattern simplify
+    if math.random() < 0.2 then
+      local i = math.random(1, p.length)
+      if i % 4 ~= 1 then p.kick[i] = false end  -- keep the 1s
+    end
+  end
+
+  -- phase transition
+  if autopilot_tick >= phase_lengths[phase] then
+    autopilot_tick = 0
+    autopilot_phase = (autopilot_phase % 4) + 1
+    -- randomize phase length for next cycle (keep it unpredictable)
+    phase_lengths[autopilot_phase] = phase_lengths[autopilot_phase] + math.random(-3, 3)
+    phase_lengths[autopilot_phase] = util.clamp(phase_lengths[autopilot_phase], 6, 20)
+  end
+
+  grid_dirty = true
+  screen_dirty = true
+end
+
+local function start_autopilot()
+  autopilot_on = true
+  autopilot_tick = 0
+  autopilot_phase = 1
+  autopilot_clock_id = clock.run(function()
+    while autopilot_on do
+      clock.sync(2)  -- evolve every 2 beats
+      if autopilot_on and playing then
+        autopilot_evolve()
+      end
+    end
+  end)
+end
+
+local function stop_autopilot()
+  autopilot_on = false
+  if autopilot_clock_id then
+    clock.cancel(autopilot_clock_id)
+    autopilot_clock_id = nil
   end
 end
 
@@ -1164,6 +1482,7 @@ end
 ---------- CLEANUP ----------
 
 function cleanup()
+  stop_autopilot()
   if seq_clock_id then clock.cancel(seq_clock_id) end
   if grid_clock_id then clock.cancel(grid_clock_id) end
   if screen_metro then screen_metro:stop() end
