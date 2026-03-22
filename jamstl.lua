@@ -113,23 +113,97 @@ local function new_pattern()
   return p
 end
 
+local function set_pattern(idx, notes, on_steps, vels, chaos_steps, kick, hat)
+  local p = patterns[idx]
+  for i = 1, 16 do
+    p.melody[i].note = notes[i] or 60
+    p.melody[i].on = on_steps[i] == 1
+    p.melody[i].vel = vels[i] or 0.7
+    p.melody[i].chaos = chaos_steps[i] or 0
+    p.melody[i].gate = (vels[i] and vels[i] > 0.85) and 0.7 or 0.4
+  end
+  for i = 1, 16 do
+    p.kick[i] = kick[i] == 1
+    p.hat[i] = hat[i] == 1
+  end
+end
+
 local function init_default_patterns()
   for i = 1, NUM_PATTERNS do
     patterns[i] = new_pattern()
   end
-  -- pattern 1: minor pentatonic groove
-  local notes = {60, 63, 65, 67, 70, 72, 70, 67, 65, 63, 60, 63, 67, 70, 72, 67}
-  local on =    {1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0}
-  for i = 1, 16 do
-    patterns[1].melody[i].on = on[i] == 1
-    patterns[1].melody[i].note = notes[i]
-    patterns[1].melody[i].vel = (i % 4 == 1) and 1.0 or 0.7
-    patterns[1].melody[i].chaos = (i > 12) and 0.4 or 0
-  end
-  patterns[1].kick = {true,false,false,false,true,false,false,false,
-                      true,false,false,false,true,false,false,false}
-  patterns[1].hat =  {false,true,false,true,false,true,false,true,
-                      false,true,false,true,false,true,false,true}
+
+  -- P1: FUNK — syncopated kick, offbeat hats, pentatonic riff
+  set_pattern(1,
+    {60, 63, 65, 67, 72, 70, 67, 63, 60, 65, 70, 72, 67, 63, 65, 60},
+    {1,  0,  1,  1,  0,  1,  0,  1,  1,  0,  1,  0,  1,  0,  0,  1},
+    {1., .5, .8, .6, .5, .9, .5, .7, 1., .5, .8, .5, .7, .4, .3, .6},
+    {0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  .3, 0,  .3, .5, 0},
+    {1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  1,  0},
+    {0,  0,  1,  0,  1,  0,  1,  1,  0,  0,  1,  0,  1,  1,  0,  1})
+
+  -- P2: ACID — 303-style, heavy on the one, ghost notes, rolling hats
+  set_pattern(2,
+    {48, 48, 60, 51, 53, 48, 60, 55, 48, 51, 63, 60, 53, 48, 55, 51},
+    {1,  1,  1,  0,  1,  1,  0,  1,  1,  0,  1,  1,  0,  1,  0,  1},
+    {1., .4, .9, .3, .6, 1., .3, .7, .9, .3, .8, .5, .4, 1., .3, .5},
+    {0,  0,  0,  0,  .4, 0,  0,  .3, 0,  0,  0,  .5, 0,  0,  .6, 0},
+    {1,  0,  0,  0,  1,  0,  1,  0,  0,  0,  1,  0,  1,  0,  0,  1},
+    {1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1})
+
+  -- P3: BROKEN — irregular kick, sparse hat, chromatic stabs
+  set_pattern(3,
+    {63, 66, 60, 68, 61, 65, 63, 70, 60, 67, 64, 72, 63, 61, 68, 60},
+    {1,  0,  0,  1,  0,  1,  0,  0,  1,  0,  0,  1,  0,  1,  0,  0},
+    {1., .5, .3, .9, .4, .7, .3, .5, 1., .4, .3, .8, .5, .6, .4, .3},
+    {.3, 0,  0,  .5, 0,  .4, 0,  0,  .3, 0,  0,  .6, 0,  .5, 0,  0},
+    {1,  0,  0,  0,  0,  0,  1,  0,  0,  1,  0,  0,  0,  0,  1,  0},
+    {0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  0,  1})
+
+  -- P4: MINIMAL — sparse, heavy spaces, low notes
+  set_pattern(4,
+    {48, 48, 55, 48, 48, 53, 48, 48, 48, 55, 48, 48, 53, 48, 48, 48},
+    {1,  0,  0,  0,  0,  0,  1,  0,  0,  0,  1,  0,  0,  0,  0,  0},
+    {1., .3, .3, .3, .3, .3, .8, .3, .3, .3, .7, .3, .3, .3, .3, .3},
+    {0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0},
+    {1,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0},
+    {0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0})
+
+  -- P5: POLYRHYTHM — 3-over-4 kick, euclidean hat, ascending melody
+  set_pattern(5,
+    {60, 62, 63, 65, 67, 68, 70, 72, 70, 68, 67, 65, 63, 62, 60, 58},
+    {1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0},
+    {.9, .4, .7, .4, .8, .4, .7, .4, .9, .4, .7, .4, .8, .4, .7, .4},
+    {0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  .3, .3, .4, .5},
+    {1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  0},
+    {1,  0,  0,  1,  0,  1,  0,  0,  1,  0,  1,  0,  0,  1,  0,  1})
+
+  -- P6: BASTL CHAOS — everything on, high chaos, dense and glitchy
+  set_pattern(6,
+    {72, 60, 75, 63, 70, 58, 67, 65, 73, 61, 68, 60, 72, 63, 67, 70},
+    {1,  1,  1,  1,  1,  0,  1,  1,  1,  1,  0,  1,  1,  1,  1,  0},
+    {.8, .6, .9, .5, .7, .3, .8, .6, .9, .5, .3, .7, .8, .6, .9, .4},
+    {.5, .3, .6, .4, .7, 0,  .5, .3, .8, .4, 0,  .6, .5, .4, .7, 0},
+    {1,  0,  1,  0,  1,  0,  0,  1,  0,  1,  0,  1,  0,  0,  1,  0},
+    {1,  1,  0,  1,  1,  0,  1,  0,  1,  1,  0,  1,  0,  1,  1,  0})
+
+  -- P7: HALFTIME — slow heavy, kick on 1 and 9, snappy hats
+  set_pattern(7,
+    {48, 48, 55, 53, 48, 48, 51, 48, 48, 55, 53, 51, 48, 48, 51, 53},
+    {1,  0,  0,  0,  1,  0,  0,  0,  1,  0,  0,  0,  1,  0,  0,  1},
+    {1., .3, .3, .3, .8, .3, .3, .3, 1., .3, .3, .3, .7, .3, .3, .6},
+    {0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  .3, 0,  .4, .5},
+    {1,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0},
+    {0,  0,  0,  0,  1,  0,  1,  0,  0,  0,  0,  0,  1,  0,  1,  0})
+
+  -- P8: FILL — dense 16th fills, all drums, high energy transition
+  set_pattern(8,
+    {72, 70, 67, 65, 63, 60, 63, 65, 67, 70, 72, 75, 72, 70, 67, 65},
+    {1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1},
+    {.6, .5, .7, .5, .8, .5, .6, .5, .7, .5, .8, .6, .9, .7, 1., .8},
+    {.2, .2, .3, .2, .3, .2, .3, .3, .4, .3, .4, .4, .5, .5, .6, .7},
+    {1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  1,  1,  1},
+    {0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  1,  1,  1,  1})
 end
 
 ---------- KEYBOARD MAP ----------
@@ -1025,11 +1099,11 @@ function init()
   params:add_number("kick_prob", "kick probability", 0, 100, 100)
   params:add_number("hat_prob", "hat probability", 0, 100, 100)
   params:add_control("kick_density", "kick ghost density",
-    controlspec.new(0, 1, 'lin', 0.01, 0))
+    controlspec.new(0, 1, 'lin', 0.01, 0.15))
   params:add_control("hat_density", "hat ghost density",
-    controlspec.new(0, 1, 'lin', 0.01, 0))
+    controlspec.new(0, 1, 'lin', 0.01, 0.25))
   params:add_control("hat_variety", "hat variety",
-    controlspec.new(0, 1, 'lin', 0.01, 0))
+    controlspec.new(0, 1, 'lin', 0.01, 0.3))
 
   -- fx
   params:add_group("FX", 6)
