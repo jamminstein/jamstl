@@ -252,9 +252,20 @@ local function advance_step()
     end
   end
 
-  -- kick
-  if p.kick[current_step] then
+  -- kick (with probability + ghost notes + fill chance)
+  local kick_prob = params:get("kick_prob")
+  local kick_density = params:get("kick_density")
+  local should_kick = p.kick[current_step]
+  -- density adds ghost kicks on empty steps
+  if not should_kick and kick_density > 0 and math.random() < kick_density * 0.3 then
+    should_kick = true
+  end
+  if should_kick and math.random(100) <= kick_prob then
     local vel = (current_step % 4 == 1) and 1.0 or 0.75
+    -- ghost notes from density are quieter
+    if not p.kick[current_step] then vel = vel * 0.4 end
+    -- velocity humanize
+    vel = util.clamp(vel + (math.random() - 0.5) * 0.15, 0.2, 1.0)
     engine.kick(vel)
     if midi_out_device and params:get("midi_out_ch") > 0 then
       midi_out_device:note_on(36, math.floor(vel * 127), params:get("midi_out_ch"))
@@ -265,9 +276,24 @@ local function advance_step()
     end
   end
 
-  -- hat
-  if p.hat[current_step] then
+  -- hat (with probability + ghost notes + open/closed variation)
+  local hat_prob = params:get("hat_prob")
+  local hat_density = params:get("hat_density")
+  local should_hat = p.hat[current_step]
+  -- density adds ghost hats
+  if not should_hat and hat_density > 0 and math.random() < hat_density * 0.4 then
+    should_hat = true
+  end
+  if should_hat and math.random(100) <= hat_prob then
     local vel = 0.4 + math.random() * 0.2
+    if not p.hat[current_step] then vel = vel * 0.35 end
+    -- hat decay variation: sometimes open, sometimes tight
+    local hat_var = params:get("hat_variety")
+    if hat_var > 0 and math.random() < hat_var then
+      local base_decay = params:get("hat_decay")
+      engine.hat_decay(base_decay * (0.5 + math.random() * 2.0))
+    end
+    vel = util.clamp(vel + (math.random() - 0.5) * 0.12, 0.15, 0.8)
     engine.hat(vel)
     if midi_out_device and params:get("midi_out_ch") > 0 then
       midi_out_device:note_on(42, math.floor(vel * 127), params:get("midi_out_ch"))
@@ -275,6 +301,10 @@ local function advance_step()
         clock.sleep(0.05)
         midi_out_device:note_off(42, 0, params:get("midi_out_ch"))
       end)
+    end
+    -- restore hat decay if we varied it
+    if hat_var > 0 then
+      engine.hat_decay(params:get("hat_decay"))
     end
   end
 
@@ -982,7 +1012,7 @@ function init()
   params:set_action("lfo2_rate", function(x) engine.lfo2_rate(x) end)
 
   -- drums
-  params:add_group("DRUMS", 3)
+  params:add_group("DRUMS", 8)
   params:add_control("kick_tune", "kick tune",
     controlspec.new(30, 200, 'exp', 1, 60, "hz"))
   params:set_action("kick_tune", function(x) engine.kick_tune(x) end)
@@ -992,6 +1022,14 @@ function init()
   params:add_control("hat_decay", "hat decay",
     controlspec.new(0.01, 0.5, 'exp', 0.01, 0.08, "s"))
   params:set_action("hat_decay", function(x) engine.hat_decay(x) end)
+  params:add_number("kick_prob", "kick probability", 0, 100, 100)
+  params:add_number("hat_prob", "hat probability", 0, 100, 100)
+  params:add_control("kick_density", "kick ghost density",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_control("hat_density", "hat ghost density",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_control("hat_variety", "hat variety",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
 
   -- fx
   params:add_group("FX", 6)

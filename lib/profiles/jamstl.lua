@@ -33,12 +33,14 @@ return {
     ---------- TIMBRAL (the heart -- filter, bitcrush, FM, noise) ----------
 
     -- filter: the single most expressive param. robot should LIVE here.
+    -- SAFETY: range_lo was 60 which made robot mute everything.
+    -- 200hz keeps the low end alive even at minimum.
     cutoff = {
       group = "timbral",
       weight = 1.0,
       sensitivity = 1.2,
       direction = "both",
-      range_lo = 60,
+      range_lo = 200,
       range_hi = 12000,
       euclidean_pulses = 7,
     },
@@ -135,13 +137,14 @@ return {
     ---------- RHYTHMIC (envelope shape, drum character) ----------
 
     -- attack: 0.005 = percussive, higher = pads/swells
+    -- attack: cap at 0.4 so notes don't vanish with short decay
     env_attack = {
       group = "rhythmic",
       weight = 0.6,
       sensitivity = 0.5,
       direction = "both",
       range_lo = 0.001,
-      range_hi = 0.8,
+      range_hi = 0.4,
       euclidean_pulses = 3,
     },
 
@@ -211,6 +214,64 @@ return {
       euclidean_pulses = 7,
     },
 
+    -- KICK PROBABILITY: robot can thin the kick pattern for breakdowns
+    kick_prob = {
+      group = "rhythmic",
+      weight = 0.5,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 50,
+      range_hi = 100,
+      euclidean_pulses = 5,
+    },
+
+    -- HAT PROBABILITY: robot can thin hats for builds/drops
+    hat_prob = {
+      group = "rhythmic",
+      weight = 0.5,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 40,
+      range_hi = 100,
+      euclidean_pulses = 7,
+    },
+
+    -- KICK GHOST DENSITY: adds ghost kicks between programmed hits.
+    -- at 0 only your pattern plays. at 0.5+ it fills in like a real drummer.
+    kick_density = {
+      group = "rhythmic",
+      weight = 0.6,
+      sensitivity = 0.5,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.6,
+      euclidean_pulses = 5,
+    },
+
+    -- HAT GHOST DENSITY: fills in ghost hats. makes static patterns alive.
+    -- this is THE fix for repetitive drums. robot adds/removes ghost notes.
+    hat_density = {
+      group = "rhythmic",
+      weight = 0.7,
+      sensitivity = 0.6,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.7,
+      euclidean_pulses = 9,
+    },
+
+    -- HAT VARIETY: chance of randomizing hat decay per hit.
+    -- 0 = identical hats. 0.5+ = mix of open and closed. instant groove.
+    hat_variety = {
+      group = "rhythmic",
+      weight = 0.6,
+      sensitivity = 0.5,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.7,
+      euclidean_pulses = 7,
+    },
+
     ---------- MELODIC (chaos system, LFOs -- the softpop brain) ----------
 
     -- CHAOS: the master knob. controls how much the LFOs affect everything.
@@ -274,13 +335,13 @@ return {
     },
 
     -- PROBABILITY: global probability scaler. thins out the pattern.
-    -- 100 = all steps play, 50 = half the steps, 0 = silence
+    -- 100 = all steps play, 60 = sparse but present. never fully silent.
     probability = {
       group = "rhythmic",
       weight = 0.6,
       sensitivity = 0.5,
       direction = "both",
-      range_lo = 30,
+      range_lo = 55,
       range_hi = 100,
       euclidean_pulses = 7,
     },
