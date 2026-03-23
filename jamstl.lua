@@ -156,6 +156,72 @@ local function euclidean(n, k, offset)
   return pattern
 end
 
+---------- PATTERN SAVE/LOAD ----------
+
+local DATA_DIR = _path.data .. "jamstl/"
+
+local function save_patterns()
+  util.make_dir(DATA_DIR)
+  local data = {
+    patterns = {},
+    current_pattern = current_pattern,
+    chain = chain,
+    pattern_morph_a = pattern_morph_a,
+    pattern_morph_b = pattern_morph_b,
+  }
+  for i = 1, NUM_PATTERNS do
+    local p = patterns[i]
+    local pd = {melody = {}, kick = {}, hat = {}, length = p.length}
+    for j = 1, NUM_STEPS do
+      pd.melody[j] = {
+        on = p.melody[j].on,
+        note = p.melody[j].note,
+        vel = p.melody[j].vel,
+        gate = p.melody[j].gate,
+        prob = p.melody[j].prob,
+        chaos = p.melody[j].chaos,
+      }
+      pd.kick[j] = p.kick[j]
+      pd.hat[j] = p.hat[j]
+    end
+    data.patterns[i] = pd
+  end
+  tab.save(data, DATA_DIR .. "patterns.data")
+end
+
+local function load_patterns()
+  local path = DATA_DIR .. "patterns.data"
+  if util.file_exists(path) then
+    local data = tab.load(path)
+    if data and data.patterns then
+      for i = 1, NUM_PATTERNS do
+        if data.patterns[i] then
+          local pd = data.patterns[i]
+          patterns[i].length = pd.length or 16
+          for j = 1, NUM_STEPS do
+            if pd.melody and pd.melody[j] then
+              patterns[i].melody[j].on = pd.melody[j].on or false
+              patterns[i].melody[j].note = pd.melody[j].note or 60
+              patterns[i].melody[j].vel = pd.melody[j].vel or 0.8
+              patterns[i].melody[j].gate = pd.melody[j].gate or 0.5
+              patterns[i].melody[j].prob = pd.melody[j].prob or 100
+              patterns[i].melody[j].chaos = pd.melody[j].chaos or 0
+            end
+            if pd.kick then patterns[i].kick[j] = pd.kick[j] or false end
+            if pd.hat then patterns[i].hat[j] = pd.hat[j] or false end
+          end
+        end
+      end
+      if data.current_pattern then current_pattern = data.current_pattern end
+      if data.chain then chain = data.chain end
+      if data.pattern_morph_a then pattern_morph_a = data.pattern_morph_a end
+      if data.pattern_morph_b then pattern_morph_b = data.pattern_morph_b end
+      return true
+    end
+  end
+  return false
+end
+
 ---------- RUNGLER ----------
 
 local function rungler_clock()
@@ -2039,8 +2105,9 @@ end
 ---------- INIT ----------
 
 function init()
-  -- init patterns
+  -- init patterns: load saved or fall back to defaults
   init_default_patterns()
+  load_patterns()  -- overwrite defaults with saved data if it exists
 
   -- MIDI
   midi_out_device = midi.connect(1)
@@ -2326,6 +2393,7 @@ end
 ---------- CLEANUP ----------
 
 function cleanup()
+  save_patterns()  -- persist patterns to disk
   stop_autopilot()
   if seq_clock_id then clock.cancel(seq_clock_id) end
   if grid_clock_id then clock.cancel(grid_clock_id) end
