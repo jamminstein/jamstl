@@ -27,8 +27,8 @@ local NUM_STEPS = 16
 local NUM_PATTERNS = 8
 local PAGES = {"PLAY", "SOUND", "CHAOS", "FX", "TAPE", "MORPH"}
 local WAVE_NAMES = {"saw", "pulse", "tri", "noise"}
-local SCALE_NAMES = {"major", "natural_minor", "dorian", "phrygian",
-  "mixolydian", "pentatonic_maj", "pentatonic_min", "chromatic"}
+local SCALE_NAMES = {"Major", "Natural Minor", "Dorian", "Phrygian",
+  "Mixolydian", "Major Pentatonic", "Minor Pentatonic", "Chromatic"}
 local SCALE_DISPLAY = {"MAJ", "MIN", "DOR", "PHR", "MIX", "PNT", "PNm", "CHR"}
 
 ---------- STATE ----------
@@ -531,6 +531,11 @@ local function randomize_all_patterns()
   local root = 48 + math.random(0, 12)
   local scale_idx = math.random(1, #SCALE_NAMES)
   local scale = musicutil.generate_scale(root, SCALE_NAMES[scale_idx], 4)
+  -- safety: if generate_scale returns nil, fall back to chromatic
+  if not scale or #scale == 0 then
+    scale = {}
+    for i = 0, 36 do table.insert(scale, root + i) end
+  end
 
   -- drum rhythm templates: euclidean fills + offsets for variety
   local kick_templates = {
