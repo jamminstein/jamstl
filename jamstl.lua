@@ -294,7 +294,8 @@ local function brain_get_response_note(original_note, step_in_phrase, scale_note
     return motif[rev_idx]
   elseif brain.response_type == 3 then
     -- TRANSPOSE: shift up a 4th or 5th
-    local interval = ({5, 7, -5, -7})[math.random(1, 4)]
+    local intervals = {5, 7, -5, -7}
+    local interval = intervals[math.random(1, 4)]
     return snap_to_scale(src_note + interval, scale_notes)
   elseif brain.response_type == 4 then
     -- AUGMENT: stretch rhythm (use every other note)
@@ -436,7 +437,8 @@ local function rungler_clock()
   rungler_step_count = rungler_step_count + 1
   local div = 1
   if params and params.lookup and params.lookup["rungler_clock_div"] then
-    div = ({1, 2, 4, 8})[params:get("rungler_clock_div")]
+    local divs = {1, 2, 4, 8}
+    div = divs[params:get("rungler_clock_div")]
   end
   if rungler_step_count % div ~= 0 then return end
   -- feedback: XOR of bits 5 and 8
@@ -811,7 +813,8 @@ local function randomize_all_patterns()
     end
 
     -- pattern length: mostly 16 but occasionally shorter for polyrhythm
-    p.length = ({16, 16, 16, 16, 12, 14, 16, 8})[math.random(1, 8)]
+    local lengths = {16, 16, 16, 16, 12, 14, 16, 8}
+    p.length = lengths[math.random(1, 8)]
   end
 end
 
@@ -1510,7 +1513,8 @@ local function grid_redraw()
   -- col 9: chain button
   g:led(9, 8, chain_mode and (#chain > 0 and 12 or 4) or (chain_edit_held and 15 or (#chain > 0 and 6 or 2)))
   -- euclidean track indicator
-  g:led(10, 8, ({8, 10, 6})[euclid_track])
+  local euclid_bright = {8, 10, 6}
+  g:led(10, 8, euclid_bright[euclid_track])
   g:led(11, 8, 4)  -- fills down
   g:led(12, 8, 4)  -- fills up
   g:led(13, 8, 4)  -- offset
@@ -1939,7 +1943,8 @@ function draw_play_page()
     screen.text("BREATH")
   elseif brain.responding and autopilot_on then
     screen.level(10)
-    screen.text({"INV","RET","TR4","AUG"}[brain.response_type] or "RESP")
+    local resp_names = {"INV","RET","TR4","AUG"}
+    screen.text(resp_names[brain.response_type] or "RESP")
   elseif autopilot_on then
     screen.level(6)
     screen.text(brain.phrase_mode)
