@@ -524,6 +524,143 @@ local function init_default_patterns()
     {0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  1,  1,  1,  1})
 end
 
+---------- RANDOMIZE PATTERNS ----------
+
+local function randomize_all_patterns()
+  -- pick a random root and scale for generation
+  local root = 48 + math.random(0, 12)
+  local scale_idx = math.random(1, #SCALE_NAMES)
+  local scale = musicutil.generate_scale(root, SCALE_NAMES[scale_idx], 4)
+
+  -- drum rhythm templates: euclidean fills + offsets for variety
+  local kick_templates = {
+    {fills = 4, offset = 0},   -- four on the floor
+    {fills = 3, offset = 0},   -- 3/4 feel
+    {fills = 5, offset = 0},   -- funky 5
+    {fills = 2, offset = 0},   -- halftime
+    {fills = 6, offset = 2},   -- dense syncopated
+    {fills = 4, offset = 1},   -- offbeat four
+    {fills = 3, offset = 2},   -- displaced triplet
+    {fills = 7, offset = 0},   -- breakbeat dense
+  }
+  local hat_templates = {
+    {fills = 8, offset = 0},   -- 8ths
+    {fills = 6, offset = 1},   -- syncopated
+    {fills = 12, offset = 0},  -- busy 16ths
+    {fills = 4, offset = 2},   -- sparse
+    {fills = 10, offset = 3},  -- almost all
+    {fills = 5, offset = 1},   -- euclidean 5
+    {fills = 7, offset = 2},   -- euclidean 7
+    {fills = 9, offset = 0},   -- 9/16
+  }
+
+  for i = 1, NUM_PATTERNS do
+    local p = patterns[i]
+
+    -- pick density: how many melody steps are active (4-12)
+    local density = 4 + math.random(0, 8)
+    local melody_euclid = euclidean(16, density, math.random(0, 5))
+
+    -- generate melody: walk through scale with occasional leaps
+    local note_idx = math.random(1, math.floor(#scale * 0.6))
+    for j = 1, 16 do
+      p.melody[j].on = melody_euclid[j] or false
+      -- random walk through scale
+      note_idx = note_idx + math.random(-2, 2)
+      note_idx = util.clamp(note_idx, 1, #scale)
+      p.melody[j].note = scale[note_idx]
+      -- varied velocities with accents on downbeats
+      p.melody[j].vel = (j % 4 == 1) and (0.7 + math.random() * 0.3) or (0.4 + math.random() * 0.4)
+      -- gate variation
+      p.melody[j].gate = 0.3 + math.random() * 0.6
+      -- probability: mostly 100, occasional drops
+      p.melody[j].prob = math.random() < 0.15 and (60 + math.random(30)) or 100
+      -- chaos: sparse, mostly on later steps
+      p.melody[j].chaos = (j > 10 and math.random() < 0.4) and (math.random() * 0.6) or 0
+    end
+
+    -- drums: pick from templates, each pattern gets a different feel
+    local kt = kick_templates[((i - 1) % #kick_templates) + 1]
+    local ht = hat_templates[((i + 2) % #hat_templates) + 1]
+    -- add randomness to template choice
+    if math.random() < 0.5 then
+      kt = kick_templates[math.random(1, #kick_templates)]
+    end
+    if math.random() < 0.5 then
+      ht = hat_templates[math.random(1, #hat_templates)]
+    end
+
+    local kick_e = euclidean(16, kt.fills, kt.offset + math.random(0, 3))
+    local hat_e = euclidean(16, ht.fills, ht.offset + math.random(0, 3))
+    for j = 1, 16 do
+      p.kick[j] = kick_e[j] or false
+      p.hat[j] = hat_e[j] or false
+    end
+
+    -- pattern length: mostly 16 but occasionally shorter for polyrhythm
+    p.length = ({16, 16, 16, 16, 12, 14, 16, 8})[math.random(1, 8)]
+  end
+end
+
+---------- MANUAL SAVE/LOAD SLOTS ----------
+
+local NUM_SAVE_SLOTS = 8
+
+local function save_to_slot(slot)
+  util.make_dir(DATA_DIR)
+  local data = {patterns = {}, current_pattern = current_pattern, chain = chain}
+  for i = 1, NUM_PATTERNS do
+    local p = patterns[i]
+    local pd = {melody = {}, kick = {}, hat = {}, length = p.length}
+    for j = 1, NUM_STEPS do
+      pd.melody[j] = {
+        on = p.melody[j].on, note = p.melody[j].note, vel = p.melody[j].vel,
+        gate = p.melody[j].gate, prob = p.melody[j].prob, chaos = p.melody[j].chaos,
+      }
+      pd.kick[j] = p.kick[j]
+      pd.hat[j] = p.hat[j]
+    end
+    data.patterns[i] = pd
+  end
+  tab.save(data, DATA_DIR .. "slot_" .. slot .. ".data")
+end
+
+local function load_from_slot(slot)
+  local path = DATA_DIR .. "slot_" .. slot .. ".data"
+  if util.file_exists(path) then
+    local data = tab.load(path)
+    if data and data.patterns then
+      for i = 1, NUM_PATTERNS do
+        if data.patterns[i] then
+          local pd = data.patterns[i]
+          patterns[i].length = pd.length or 16
+          for j = 1, NUM_STEPS do
+            if pd.melody and pd.melody[j] then
+              patterns[i].melody[j].on = pd.melody[j].on or false
+              patterns[i].melody[j].note = pd.melody[j].note or 60
+              patterns[i].melody[j].vel = pd.melody[j].vel or 0.8
+              patterns[i].melody[j].gate = pd.melody[j].gate or 0.5
+              patterns[i].melody[j].prob = pd.melody[j].prob or 100
+              patterns[i].melody[j].chaos = pd.melody[j].chaos or 0
+            end
+            if pd.kick then patterns[i].kick[j] = pd.kick[j] or false end
+            if pd.hat then patterns[i].hat[j] = pd.hat[j] or false end
+          end
+        end
+      end
+      if data.current_pattern then current_pattern = data.current_pattern end
+      if data.chain then chain = data.chain end
+      update_keyboard()
+      return true
+    end
+  end
+  return false
+end
+
+local function slot_exists(slot)
+  return util.file_exists(DATA_DIR .. "slot_" .. slot .. ".data")
+end
+
 ---------- KEYBOARD MAP ----------
 
 local function update_keyboard()
@@ -2105,9 +2242,9 @@ end
 ---------- INIT ----------
 
 function init()
-  -- init patterns: load saved or fall back to defaults
+  -- init patterns: always start with fresh randomized patterns
   init_default_patterns()
-  load_patterns()  -- overwrite defaults with saved data if it exists
+  randomize_all_patterns()
 
   -- MIDI
   midi_out_device = midi.connect(1)
@@ -2302,6 +2439,22 @@ function init()
   params:add_control("xmod_chaos_pan", "CHAOS>PAN",
     controlspec.new(0, 1, 'lin', 0.01, 0))
 
+  -- save/load slots
+  params:add_group("SAVE/LOAD", 3)
+  params:add_option("save_slot", "save to slot", {"1","2","3","4","5","6","7","8"}, 1)
+  params:add_trigger("save_go", ">> SAVE <<")
+  params:set_action("save_go", function()
+    save_to_slot(params:get("save_slot"))
+  end)
+  params:add_trigger("load_go", ">> LOAD <<")
+  params:set_action("load_go", function()
+    local slot = params:get("save_slot")
+    if load_from_slot(slot) then
+      grid_dirty = true
+      screen_dirty = true
+    end
+  end)
+
   -- init keyboard
   update_keyboard()
 
@@ -2393,7 +2546,6 @@ end
 ---------- CLEANUP ----------
 
 function cleanup()
-  save_patterns()  -- persist patterns to disk
   stop_autopilot()
   if seq_clock_id then clock.cancel(seq_clock_id) end
   if grid_clock_id then clock.cancel(grid_clock_id) end
