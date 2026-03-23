@@ -23,10 +23,7 @@ return {
     "clock_source",
     "midi_out_ch",
     "midi_in_ch",
-    "root_note",
-    "scale_type",
     "pattern_length",
-    "waveform",
   },
 
   params = {
@@ -598,6 +595,56 @@ return {
       range_lo = 0,
       range_hi = 0.6,
       euclidean_pulses = 7,
+    },
+
+    ---------- UNLOCKED COMPOSITIONAL (dramatic, rare, high impact) ----------
+
+    -- WAVEFORM: saw/pulse/tri/noise. each is a completely different character.
+    -- robot should switch rarely but decisively — instant timbral transformation.
+    waveform = {
+      group = "structural",
+      weight = 0.15,
+      sensitivity = 0.2,
+      direction = "both",
+      range_lo = 1,
+      range_hi = 4,
+      euclidean_pulses = 3,
+    },
+
+    -- ROOT NOTE: key changes. +-5 semitones from C keeps it musical.
+    -- a robot key change at the right moment is transcendent.
+    root_note = {
+      group = "structural",
+      weight = 0.1,
+      sensitivity = 0.15,
+      direction = "both",
+      range_lo = 55,
+      range_hi = 65,
+      euclidean_pulses = 3,
+    },
+
+    -- SCALE TYPE: major/minor/dorian/phrygian/mixolydian/pentatonic/chromatic.
+    -- switching scales is an instant mood shift. very powerful, use sparingly.
+    scale_type = {
+      group = "structural",
+      weight = 0.1,
+      sensitivity = 0.15,
+      direction = "both",
+      range_lo = 1,
+      range_hi = 7,
+      euclidean_pulses = 3,
+    },
+
+    -- RUNGLER CLOCK DIV: changes how fast the shift register clocks.
+    -- 1 = every step (frantic), 8 = every 8 steps (slow evolution).
+    rungler_clock_div = {
+      group = "rhythmic",
+      weight = 0.3,
+      sensitivity = 0.3,
+      direction = "both",
+      range_lo = 1,
+      range_hi = 4,
+      euclidean_pulses = 3,
     },
   },
 }
