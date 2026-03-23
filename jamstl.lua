@@ -121,6 +121,39 @@ local TAPE_BUF_SEC = 16
 -- cross modulation
 local XMOD_NAMES = {"LFO1>LFO2", "STEP>CUT", "NOTE>DLY", "CHAOS>PAN"}
 
+-- musical brain
+local brain = {
+  -- self-listening: what actually played in last 16 steps
+  history = {},           -- ring buffer of {note=N, vel=V, played=bool, kick=bool, hat=bool}
+  history_pos = 0,
+  silent_count = 0,       -- consecutive steps where melody didn't fire
+  dense_count = 0,        -- consecutive steps where everything fired
+
+  -- musical memory: saved motifs (up to 4 phrases)
+  motifs = {},            -- array of {notes={}, rhythm={}, length=N}
+  motif_age = {},         -- how many bars since each motif was last used
+
+  -- phrase arc: where we are in a 4-bar sentence
+  phrase_step = 0,        -- 0-63 (4 bars of 16 steps)
+  phrase_mode = "setup",  -- "setup", "develop", "climax", "resolve"
+  phrase_count = 0,       -- how many phrases have elapsed
+
+  -- call & response
+  last_phrase_notes = {}, -- notes from the last phrase
+  responding = false,     -- are we in a response phrase?
+  response_type = 1,      -- 1=invert, 2=retrograde, 3=transpose, 4=augment
+
+  -- dramatic silence
+  silence_timer = 0,      -- counts down bars until next silence event
+  in_silence = false,     -- currently in a dramatic pause
+  silence_steps = 0,      -- how many steps of silence remain
+  sustain_note = nil,     -- note being held during a sustain moment
+
+  -- track conversation
+  melody_activity = 0.5,  -- 0-1 rolling average of melody firing
+  drum_activity = 0.5,    -- 0-1 rolling average of drum firing
+}
+
 -- clocks
 local seq_clock_id
 local grid_clock_id
@@ -154,6 +187,181 @@ local function euclidean(n, k, offset)
     end
   end
   return pattern
+end
+
+---------- MUSICAL BRAIN ----------
+
+-- record what actually happened on each step
+local function brain_record_step(melody_played, note, vel, kick_played, hat_played)
+  brain.history_pos = (brain.history_pos % 64) + 1
+  brain.history[brain.history_pos] = {
+    note = note, vel = vel or 0,
+    played = melody_played, kick = kick_played, hat = hat_played
+  }
+
+  -- self-listening: track silence and density
+  if melody_played then
+    brain.silent_count = 0
+    brain.dense_count = (kick_played and hat_played) and brain.dense_count + 1 or 0
+  else
+    brain.silent_count = brain.silent_count + 1
+    brain.dense_count = 0
+  end
+
+  -- rolling activity averages (exponential decay)
+  brain.melody_activity = brain.melody_activity * 0.9 + (melody_played and 0.1 or 0)
+  brain.drum_activity = brain.drum_activity * 0.9 + ((kick_played or hat_played) and 0.1 or 0)
+
+  -- phrase tracking
+  brain.phrase_step = brain.phrase_step + 1
+  if brain.phrase_step <= 16 then
+    brain.phrase_mode = "setup"
+  elseif brain.phrase_step <= 32 then
+    brain.phrase_mode = "develop"
+  elseif brain.phrase_step <= 48 then
+    brain.phrase_mode = "climax"
+  elseif brain.phrase_step <= 64 then
+    brain.phrase_mode = "resolve"
+  end
+
+  -- collect notes for current phrase
+  if melody_played and note then
+    table.insert(brain.last_phrase_notes, note)
+  end
+
+  -- phrase boundary: every 64 steps (4 bars)
+  if brain.phrase_step >= 64 then
+    brain.phrase_step = 0
+    brain.phrase_count = brain.phrase_count + 1
+
+    -- save motif if interesting (has 4+ notes)
+    if #brain.last_phrase_notes >= 4 then
+      -- only keep 4 motifs max
+      if #brain.motifs >= 4 then table.remove(brain.motifs, 1) end
+      local motif = {}
+      for _, n in ipairs(brain.last_phrase_notes) do
+        table.insert(motif, n)
+      end
+      table.insert(brain.motifs, motif)
+    end
+
+    -- decide if next phrase is a response
+    if #brain.last_phrase_notes >= 4 and math.random() < 0.4 then
+      brain.responding = true
+      brain.response_type = math.random(1, 4)
+    else
+      brain.responding = false
+    end
+
+    brain.last_phrase_notes = {}
+
+    -- dramatic silence timer
+    brain.silence_timer = brain.silence_timer - 1
+    if brain.silence_timer <= 0 then
+      brain.silence_timer = math.random(6, 15)  -- next silence in 6-15 phrases
+      brain.in_silence = true
+      brain.silence_steps = math.random(4, 12)  -- 4-12 steps of silence
+      -- sometimes hold a single note instead of full silence
+      if math.random() < 0.4 then
+        local p = patterns[current_pattern]
+        for i = 1, p.length do
+          if p.melody[i].on then
+            brain.sustain_note = p.melody[i].note
+            break
+          end
+        end
+      end
+    end
+  end
+end
+
+-- call & response: transform a melody for the response phrase
+local function brain_get_response_note(original_note, step_in_phrase, scale_notes)
+  if not brain.responding or #brain.motifs == 0 then return nil end
+
+  local motif = brain.motifs[#brain.motifs]  -- most recent motif
+  local motif_idx = ((step_in_phrase - 1) % #motif) + 1
+  local src_note = motif[motif_idx]
+
+  if brain.response_type == 1 then
+    -- INVERT: mirror around the root
+    local root = params:get("root_note")
+    local interval = src_note - root
+    return snap_to_scale(root - interval, scale_notes)
+  elseif brain.response_type == 2 then
+    -- RETROGRADE: play motif backwards
+    local rev_idx = #motif - motif_idx + 1
+    return motif[rev_idx]
+  elseif brain.response_type == 3 then
+    -- TRANSPOSE: shift up a 4th or 5th
+    local interval = ({5, 7, -5, -7})[math.random(1, 4)]
+    return snap_to_scale(src_note + interval, scale_notes)
+  elseif brain.response_type == 4 then
+    -- AUGMENT: stretch rhythm (use every other note)
+    local aug_idx = ((math.floor((step_in_phrase - 1) / 2)) % #motif) + 1
+    return motif[aug_idx]
+  end
+  return nil
+end
+
+-- self-listening: should we force a note or thin out?
+local function brain_should_force_note()
+  return brain.silent_count >= 4  -- 4 consecutive silent steps = force something
+end
+
+local function brain_should_thin()
+  return brain.dense_count >= 6  -- 6 consecutive dense steps = thin out
+end
+
+-- dramatic silence: are we in a pause?
+local function brain_check_silence()
+  if brain.in_silence then
+    brain.silence_steps = brain.silence_steps - 1
+    if brain.silence_steps <= 0 then
+      brain.in_silence = false
+      brain.sustain_note = nil
+      return false
+    end
+    return true
+  end
+  return false
+end
+
+-- track conversation: adjust drum density based on melody activity
+local function brain_get_drum_boost()
+  -- when melody is sparse, drums get busier. when melody is dense, drums relax.
+  local mel = brain.melody_activity
+  if mel < 0.2 then return 0.3      -- melody quiet: drums fill
+  elseif mel > 0.7 then return -0.2  -- melody busy: drums pull back
+  else return 0 end
+end
+
+-- track conversation: adjust melody probability based on drum activity
+local function brain_get_melody_boost()
+  local drum = brain.drum_activity
+  if drum < 0.2 then return 15       -- drums quiet: melody more likely
+  elseif drum > 0.7 then return -10  -- drums busy: melody thins
+  else return 0 end
+end
+
+-- recall a random saved motif and apply it to the current pattern
+local function brain_recall_motif()
+  if #brain.motifs == 0 then return end
+  local motif = brain.motifs[math.random(1, #brain.motifs)]
+  local p = patterns[current_pattern]
+  local scale_notes = musicutil.generate_scale(
+    params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 4)
+  if not scale_notes or #scale_notes == 0 then return end
+
+  -- apply motif to active steps, transposed to current key
+  local active = {}
+  for i = 1, p.length do
+    if p.melody[i].on then table.insert(active, i) end
+  end
+  for i, step_idx in ipairs(active) do
+    local motif_idx = ((i - 1) % #motif) + 1
+    p.melody[step_idx].note = snap_to_scale(motif[motif_idx], scale_notes)
+  end
 end
 
 ---------- PATTERN SAVE/LOAD ----------
@@ -823,20 +1031,75 @@ local function advance_step()
   local rung_amt = params:get("rungler_amt")
   local rung_norm = rungler_value / 255
 
-  -- ===== MELODY =====
-  if step.on then
-    local step_chaos = step.chaos
+  -- ===== MELODY (with musical brain) =====
+  local melody_played = false
+  local played_note = nil
+
+  -- DRAMATIC SILENCE: check if we're in a pause
+  local in_silence = brain_check_silence()
+
+  if in_silence then
+    -- during silence: either hold a sustain note or play nothing
+    if brain.sustain_note and brain.silence_steps > 2 then
+      -- hold one note with long gate for dramatic effect
+      if brain.silence_steps == (math.floor(brain.silence_steps / 3) * 3) then
+        local freq = musicutil.note_num_to_freq(brain.sustain_note)
+        engine.note_on(brain.sustain_note, freq, 0.6)
+      end
+    end
+    -- suppress melody during silence
+  elseif step.on or brain_should_force_note() then
+    local step_chaos = step.on and step.chaos or 0
     local drift = params:get("note_drift")
     local total_chaos = step_chaos + drift
     if total_chaos > 0 then
       engine.chaos(params:get("chaos_amt") + step_chaos)
     end
+
+    -- TRACK CONVERSATION: melody probability adjusted by drum activity
     local effective_prob = step.prob * (params:get("probability") / 100)
+    effective_prob = effective_prob + brain_get_melody_boost()
+
+    -- SELF-LISTENING: force note if too many silent steps
+    if brain_should_force_note() then effective_prob = 100 end
+    -- SELF-LISTENING: thin if too dense
+    if brain_should_thin() then effective_prob = effective_prob * 0.5 end
+
+    -- PHRASE ARC: adjust intensity based on position in phrase
+    if brain.phrase_mode == "setup" then
+      -- setup: moderate, establish the figure
+    elseif brain.phrase_mode == "develop" then
+      -- develop: slightly more active
+      effective_prob = math.min(effective_prob + 10, 100)
+    elseif brain.phrase_mode == "climax" then
+      -- climax: most intense, higher velocity
+      effective_prob = math.min(effective_prob + 15, 100)
+    elseif brain.phrase_mode == "resolve" then
+      -- resolve: pull back, quieter
+      effective_prob = effective_prob * 0.8
+    end
+
     if math.random(100) <= effective_prob then
       local note = step.note + (params:get("octave_shift") * 12)
       local vel = step.vel
       local scale_notes = musicutil.generate_scale(
         params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 5)
+      if not scale_notes or #scale_notes == 0 then
+        scale_notes = {note}
+      end
+
+      -- CALL & RESPONSE: override note if in response mode
+      if brain.responding and autopilot_on then
+        local resp_note = brain_get_response_note(note, brain.phrase_step, scale_notes)
+        if resp_note then
+          note = snap_to_scale(resp_note, scale_notes)
+        end
+      end
+
+      -- MUSICAL MEMORY: occasionally recall a motif (rare, during resolve)
+      if brain.phrase_mode == "resolve" and math.random() < 0.08 and autopilot_on then
+        brain_recall_motif()
+      end
 
       -- rungler note offset
       if rung_amt > 0.01 then
@@ -849,7 +1112,13 @@ local function advance_step()
         local drift_amt = math.floor(total_chaos * 4)
         note = snap_to_scale(note + math.random(-drift_amt, drift_amt), scale_notes)
       end
-      -- velocity variation
+
+      -- velocity: phrase arc shapes dynamics
+      if brain.phrase_mode == "climax" then
+        vel = util.clamp(vel * 1.2, 0.5, 1.0)
+      elseif brain.phrase_mode == "resolve" then
+        vel = util.clamp(vel * 0.7, 0.2, 0.8)
+      end
       if total_chaos > 0 then
         vel = util.clamp(vel + (math.random() - 0.5) * total_chaos * 0.3, 0.1, 1.0)
       end
@@ -862,27 +1131,34 @@ local function advance_step()
 
       local gate = beat_dur * step.gate * 2 * params:get("gate_length")
       play_note(note, vel, gate)
+      melody_played = true
+      played_note = note
     end
     if total_chaos > 0 then
       engine.chaos(params:get("chaos_amt"))
     end
-    -- restore cutoff after rungler mod
     if rung_amt > 0.01 then
       engine.cutoff(params:get("cutoff"))
     end
   end
 
   -- ===== KICK =====
+  local kick_played = false
   local kick_prob = params:get("kick_prob")
   local kick_density = params:get("kick_density")
+  -- TRACK CONVERSATION: drum density adjusts based on melody activity
+  local drum_boost = brain_get_drum_boost()
+  local adj_kick_density = util.clamp(kick_density + drum_boost, 0, 1)
   local should_kick = raw_kick
-  if not should_kick and kick_density > 0 and math.random() < kick_density * 0.3 then
+  if not should_kick and adj_kick_density > 0 and math.random() < adj_kick_density * 0.3 then
     should_kick = true
   end
   -- rungler ghost kicks
   if not should_kick and rung_amt > 0.3 and rungler_register[3] == 1 then
     should_kick = true
   end
+  -- dramatic silence suppresses drums too (but less aggressively)
+  if in_silence and brain.silence_steps > 4 then should_kick = false end
   if should_kick and math.random(100) <= kick_prob then
     local vel = (current_step % 4 == 1) and 1.0 or 0.75
     if not raw_kick then vel = vel * 0.4 end
@@ -897,19 +1173,24 @@ local function advance_step()
       midi_note_off(36)
       opxy_note_off(36, opxy_drum_ch)
     end)
+    kick_played = true
   end
 
   -- ===== HAT =====
+  local hat_played = false
   local hat_prob = params:get("hat_prob")
   local hat_density = params:get("hat_density")
+  local adj_hat_density = util.clamp(hat_density + drum_boost, 0, 1)
   local should_hat = raw_hat
-  if not should_hat and hat_density > 0 and math.random() < hat_density * 0.4 then
+  if not should_hat and adj_hat_density > 0 and math.random() < adj_hat_density * 0.4 then
     should_hat = true
   end
   -- rungler ghost hats
   if not should_hat and rung_amt > 0.4 and rungler_register[6] == 1 then
     should_hat = true
   end
+  -- dramatic silence
+  if in_silence and brain.silence_steps > 6 then should_hat = false end
   if should_hat and math.random(100) <= hat_prob then
     local vel = 0.4 + math.random() * 0.2
     if not raw_hat then vel = vel * 0.35 end
@@ -931,7 +1212,11 @@ local function advance_step()
     if hat_var > 0 then
       engine.hat_decay(params:get("hat_decay"))
     end
+    hat_played = true
   end
+
+  -- BRAIN: record what happened this step
+  brain_record_step(melody_played, played_note, step.vel, kick_played, hat_played)
 
   -- CROSS-MOD: step-based modulations
   apply_cross_mod()
@@ -1649,7 +1934,19 @@ function draw_play_page()
   screen.move(32, 44)
   screen.text(SCALE_DISPLAY[params:get("scale_type")])
   screen.move(64, 44)
-  screen.text(autopilot_on and "AUTO" or "E3:mutate")
+  if brain.in_silence then
+    screen.level(math.floor(util.time() * 3) % 2 == 0 and 12 or 0)
+    screen.text("BREATH")
+  elseif brain.responding and autopilot_on then
+    screen.level(10)
+    screen.text({"INV","RET","TR4","AUG"}[brain.response_type] or "RESP")
+  elseif autopilot_on then
+    screen.level(6)
+    screen.text(brain.phrase_mode)
+  else
+    screen.level(4)
+    screen.text("E3:mutate")
+  end
 
   -- chaos bar
   local chaos = params:get("chaos_amt")
