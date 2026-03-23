@@ -1851,23 +1851,18 @@ function redraw()
     end
   end
 
-  -- AUTOPILOT indicator — visible on ALL pages, top right, pulsing
+  -- AUTOPILOT indicator — top right, compact
   if autopilot_on then
     local pulse = math.floor(8 + math.sin(util.time() * 4) * 7)
     screen.level(pulse)
     screen.font_size(8)
-    screen.move(88, 7)
-    screen.text("AUTO")
-    -- phase indicator bar
+    screen.move(104, 7)
+    screen.text("A")
+    -- phase progress dot
     screen.level(6)
-    local phase_w = math.floor((autopilot_tick / (phase_lengths[autopilot_phase] or 12)) * 38)
-    screen.rect(88, 8, phase_w, 2)
+    local phase_pct = autopilot_tick / (phase_lengths[autopilot_phase] or 12)
+    screen.rect(116, 2, math.floor(phase_pct * 10), 3)
     screen.fill()
-    -- phase name
-    screen.level(3)
-    screen.font_size(8)
-    screen.move(88, 63)
-    screen.text(PHASE_NAMES[autopilot_phase] or "")
   end
 
   screen.update()
@@ -1887,7 +1882,7 @@ function draw_play_page()
   screen.move(56, 7)
   screen.text(string.format("%d", params:get("clock_tempo")))
   screen.level(7)
-  screen.move(108, 7)
+  screen.move(90, 7)
   screen.text("P" .. current_pattern)
 
   -- step boxes
@@ -2101,16 +2096,28 @@ function draw_chaos_page()
     screen.text(XOR_NAMES[xm])
   end
 
+  -- engineer status (compact)
+  if autopilot_on then
+    screen.level(5)
+    screen.font_size(8)
+    screen.move(0, 58)
+    screen.text("T:" .. string.sub(ENG_TIMBRE_MODES[eng.timbre.mode], 1, 3))
+    screen.move(28, 58)
+    screen.text("F:" .. string.sub(ENG_FILTER_MODES[eng.filter.mode], 1, 3))
+    screen.move(56, 58)
+    screen.text("R:" .. string.sub(ENG_RHYTHM_MODES[eng.rhythm.mode], 1, 3))
+    screen.move(84, 58)
+    screen.text("S:" .. string.sub(ENG_SPACE_MODES[eng.space.mode], 1, 3))
+    -- energy bar
+    screen.level(math.floor(eng.energy * 12) + 2)
+    screen.rect(112, 53, math.floor(eng.energy * 14), 3)
+    screen.fill()
+  end
+
   -- drop/build indicator
   screen.level(drop_active and 15 or 3)
-  screen.move(0, 60)
+  screen.move(0, 64)
   screen.text(drop_active and "K3:RELEASE!" or "K3:drop")
-
-  if autopilot_on then
-    screen.level(15)
-    screen.move(80, 60)
-    screen.text("AUTO")
-  end
 end
 
 function draw_fx_page()
@@ -2302,15 +2309,310 @@ function draw_morph_page()
   end
 end
 
+---------- ENGINEERS ----------
+-- 5 autonomous subsystems, each managing a domain of sound
+-- they share state via the 'eng' table and are coordinated by a conductor
+
+local ENG_TIMBRE_MODES = {"morph", "jump", "drift", "hold"}
+local ENG_FILTER_MODES = {"sweep", "acid", "breathe", "pulse"}
+local ENG_RHYTHM_MODES = {"evolve", "fill", "strip", "poly"}
+local ENG_SPACE_MODES  = {"expand", "contract", "dub", "dry"}
+local ENG_CHAOS_MODES  = {"creep", "surge", "glitch", "calm"}
+
+local eng = {
+  -- shared awareness: each engineer reads this to know what others are doing
+  energy = 0.5,         -- 0-1 overall energy level (conductor sets this)
+  tension = 0.5,        -- 0-1 harmonic/rhythmic tension
+  density = 0.5,        -- 0-1 how full the arrangement is
+  direction = 1,        -- 1=building, -1=deconstructing, 0=holding
+
+  -- per-engineer state
+  timbre = {mode = 1, tick = 0, target_wave = 1, target_fm = 0, target_pw = 0.5},
+  filter = {mode = 1, tick = 0, sweep_pos = 0.5, sweep_dir = 1, acid_step = 0},
+  rhythm = {mode = 1, tick = 0, fill_density = 0, bar_count = 0},
+  space  = {mode = 1, tick = 0, depth = 0.3},
+  chaos  = {mode = 1, tick = 0, level = 0, target = 0},
+}
+
+-- CONDUCTOR: reads all engineers and sets shared state
+local function engineer_conduct()
+  -- compute energy from what's actually happening
+  local mel = brain.melody_activity
+  local drm = brain.drum_activity
+  local chaos = params:get("chaos_amt")
+  local cut = params:get("cutoff")
+  local cut_norm = (cut - 200) / 11800
+
+  eng.energy = mel * 0.3 + drm * 0.3 + chaos * 0.2 + cut_norm * 0.2
+  eng.density = mel * 0.4 + drm * 0.4 + (params:get("hat_density") + params:get("kick_density")) * 0.1
+  eng.tension = chaos * 0.3 + params:get("res") / 3.5 * 0.3 + params:get("rungler_amt") * 0.2 + (1 - cut_norm) * 0.2
+
+  -- direction: based on brain phrase arc
+  if brain.phrase_mode == "setup" or brain.phrase_mode == "develop" then
+    eng.direction = 1
+  elseif brain.phrase_mode == "climax" then
+    eng.direction = 0
+  else
+    eng.direction = -1
+  end
+end
+
+-- TIMBRE ENGINEER: waveform, FM, pulse width, sub, noise
+local function engineer_timbre()
+  eng.timbre.tick = eng.timbre.tick + 1
+  if eng.timbre.tick % 8 ~= 0 then return end  -- slow: every 8 autopilot ticks (~16 beats)
+
+  local mode = eng.timbre.mode
+  if mode == 1 then
+    -- MORPH: slowly crossfade between timbral states
+    local fm = params:get("fm_amt")
+    local target = eng.direction > 0 and 0.6 or 0.1
+    params:set("fm_amt", util.clamp(fm + (target - fm) * 0.15, 0, 1.5))
+    local pw = params:get("pw")
+    params:set("pw", util.clamp(pw + (math.random() - 0.5) * 0.05, 0.15, 0.85))
+    -- occasionally shift sub/noise balance
+    if math.random() < 0.2 then
+      params:set("sub_amt", util.clamp(params:get("sub_amt") + (eng.direction > 0 and 0.05 or -0.05), 0, 0.5))
+    end
+  elseif mode == 2 then
+    -- JUMP: sudden timbral shifts
+    if math.random() < 0.3 then
+      params:set("waveform", math.random(1, 4))
+      params:set("fm_amt", math.random() * 1.0)
+      params:set("fm_ratio", 0.5 + math.random() * 4)
+    end
+  elseif mode == 3 then
+    -- DRIFT: very slow random walk
+    params:set("fm_amt", util.clamp(params:get("fm_amt") + (math.random() - 0.5) * 0.03, 0, 1.0))
+    params:set("noise_amt", util.clamp(params:get("noise_amt") + (math.random() - 0.5) * 0.02, 0, 0.3))
+    params:set("sub_amt", util.clamp(params:get("sub_amt") + (math.random() - 0.5) * 0.02, 0, 0.4))
+  elseif mode == 4 then
+    -- HOLD: lock timbre, only micro-variations
+    params:set("pw", util.clamp(params:get("pw") + (math.random() - 0.5) * 0.01, 0.2, 0.8))
+  end
+end
+
+-- FILTER ENGINEER: cutoff, resonance, envelope shape
+local function engineer_filter()
+  eng.filter.tick = eng.filter.tick + 1
+  if eng.filter.tick % 2 ~= 0 then return end  -- medium pace: every 2 ticks (~4 beats)
+
+  local mode = eng.filter.mode
+  if mode == 1 then
+    -- SWEEP: long slow filter sweeps following energy
+    local target = 400 + eng.energy * 10000
+    local cut = params:get("cutoff")
+    params:set("cutoff", util.clamp(cut + (target - cut) * 0.08, 200, 12000))
+  elseif mode == 2 then
+    -- ACID: resonance builds, filter dips and spikes
+    eng.filter.acid_step = eng.filter.acid_step + 1
+    local acid_cycle = math.sin(eng.filter.acid_step * 0.3) * 0.5 + 0.5
+    params:set("cutoff", util.clamp(800 + acid_cycle * 8000, 200, 12000))
+    params:set("res", util.clamp(1.5 + acid_cycle * 1.5, 0.3, 3.0))
+    -- occasional res spike
+    if math.random() < 0.1 then
+      params:set("res", util.clamp(params:get("res") + 0.5, 0.3, 3.0))
+    end
+  elseif mode == 3 then
+    -- BREATHE: filter opens and closes like breathing
+    eng.filter.sweep_pos = eng.filter.sweep_pos + 0.08 * eng.filter.sweep_dir
+    if eng.filter.sweep_pos > 1 then eng.filter.sweep_dir = -1 end
+    if eng.filter.sweep_pos < 0 then eng.filter.sweep_dir = 1 end
+    params:set("cutoff", 300 + eng.filter.sweep_pos * 8000)
+    -- res follows inversely
+    params:set("res", util.clamp(2.0 - eng.filter.sweep_pos * 1.5, 0.3, 2.5))
+  elseif mode == 4 then
+    -- PULSE: rhythmic filter pumping (quick open, slow close)
+    local step_in_bar = current_step % 4
+    if step_in_bar == 1 then
+      params:set("cutoff", util.clamp(params:get("cutoff") + 3000, 200, 12000))
+    else
+      params:set("cutoff", util.clamp(params:get("cutoff") * 0.85, 200, 12000))
+    end
+  end
+end
+
+-- RHYTHM ENGINEER: drum patterns, ghost density, fills
+local function engineer_rhythm()
+  eng.rhythm.tick = eng.rhythm.tick + 1
+  if eng.rhythm.tick % 4 ~= 0 then return end  -- bar-level: every 4 ticks (~8 beats)
+
+  local p = patterns[current_pattern]
+  local mode = eng.rhythm.mode
+
+  if mode == 1 then
+    -- EVOLVE: gradual drum pattern mutation following energy
+    if eng.energy > 0.5 then
+      -- high energy: add hits
+      params:set("kick_density", util.clamp(params:get("kick_density") + 0.04, 0, 0.7))
+      params:set("hat_density", util.clamp(params:get("hat_density") + 0.05, 0, 0.8))
+      params:set("hat_variety", util.clamp(params:get("hat_variety") + 0.03, 0, 0.7))
+    else
+      -- low energy: strip back
+      params:set("kick_density", util.clamp(params:get("kick_density") - 0.03, 0, 0.7))
+      params:set("hat_density", util.clamp(params:get("hat_density") - 0.04, 0, 0.8))
+    end
+  elseif mode == 2 then
+    -- FILL: build fills, then drop back
+    eng.rhythm.fill_density = eng.rhythm.fill_density + 0.1
+    if eng.rhythm.fill_density > 1 then
+      -- fill climax: reset
+      eng.rhythm.fill_density = 0
+      -- drop kick to just downbeats
+      for i = 1, p.length do
+        if i % 4 ~= 1 then p.kick[i] = false end
+      end
+    else
+      -- building: add more and more hits
+      local i = math.random(1, p.length)
+      if math.random() < eng.rhythm.fill_density then
+        p.hat[i] = true
+      end
+      if math.random() < eng.rhythm.fill_density * 0.5 then
+        p.kick[i] = true
+      end
+    end
+  elseif mode == 3 then
+    -- STRIP: progressively remove hits until only skeleton remains
+    if math.random() < 0.4 then
+      local i = math.random(1, p.length)
+      if i % 4 ~= 1 then p.kick[i] = false end
+    end
+    if math.random() < 0.3 then
+      local i = math.random(1, p.length)
+      p.hat[i] = false
+    end
+    params:set("kick_density", util.clamp(params:get("kick_density") - 0.05, 0, 0.7))
+    params:set("hat_density", util.clamp(params:get("hat_density") - 0.06, 0, 0.8))
+  elseif mode == 4 then
+    -- POLY: shift XOR patterns for polyrhythmic layers
+    if math.random() < 0.3 then
+      params:set("xor_kick_fills", math.random(3, 11))
+      params:set("xor_hat_fills", math.random(4, 13))
+      if params:get("xor_mode") == 1 then
+        params:set("xor_mode", 2)  -- enable XOR if not on
+      end
+    end
+  end
+end
+
+-- SPACE ENGINEER: delay, reverb, tape, pan
+local function engineer_space()
+  eng.space.tick = eng.space.tick + 1
+  if eng.space.tick % 6 ~= 0 then return end  -- section-level: every 6 ticks (~12 beats)
+
+  local mode = eng.space.mode
+  if mode == 1 then
+    -- EXPAND: gradually increase depth and width
+    eng.space.depth = util.clamp(eng.space.depth + 0.05, 0, 0.8)
+    params:set("delay_mix", util.clamp(eng.space.depth * 0.6, 0, 0.5))
+    params:set("reverb_mix", util.clamp(eng.space.depth * 0.5, 0, 0.4))
+    params:set("delay_fb", util.clamp(0.2 + eng.space.depth * 0.5, 0.2, 0.75))
+    -- stereo widens
+    if math.random() < 0.3 then
+      params:set("pan", (math.random() - 0.5) * eng.space.depth)
+    end
+  elseif mode == 2 then
+    -- CONTRACT: pull everything dry and tight
+    eng.space.depth = util.clamp(eng.space.depth - 0.06, 0, 0.8)
+    params:set("delay_mix", util.clamp(eng.space.depth * 0.4, 0, 0.5))
+    params:set("reverb_mix", util.clamp(eng.space.depth * 0.3, 0, 0.4))
+    params:set("pan", params:get("pan") * 0.8)  -- narrow toward center
+  elseif mode == 3 then
+    -- DUB: high feedback delay, spacious, delay bits degrade
+    params:set("delay_fb", util.clamp(params:get("delay_fb") + 0.03, 0.3, 0.85))
+    params:set("delay_mix", util.clamp(params:get("delay_mix") + 0.02, 0.1, 0.5))
+    if math.random() < 0.2 then
+      params:set("delay_bits", math.random(4, 12))
+    end
+    if math.random() < 0.15 then
+      params:set("delay_time", 0.1 + math.random() * 0.6)
+    end
+  elseif mode == 4 then
+    -- DRY: minimal effects, clean and present
+    params:set("delay_mix", util.clamp(params:get("delay_mix") - 0.03, 0, 0.1))
+    params:set("reverb_mix", util.clamp(params:get("reverb_mix") - 0.02, 0, 0.1))
+    params:set("delay_fb", util.clamp(params:get("delay_fb") - 0.02, 0.1, 0.5))
+    params:set("pan", params:get("pan") * 0.9)
+  end
+end
+
+-- CHAOS ENGINEER: rungler, cross-mod, bitcrush, sample rate
+local function engineer_chaos()
+  eng.chaos.tick = eng.chaos.tick + 1
+  if eng.chaos.tick % 3 ~= 0 then return end  -- unpredictable: every 3 ticks (~6 beats)
+
+  local mode = eng.chaos.mode
+  if mode == 1 then
+    -- CREEP: slowly escalate chaos, then snap back
+    eng.chaos.level = eng.chaos.level + 0.02
+    if eng.chaos.level > 0.8 then eng.chaos.level = 0 end  -- snap back
+    params:set("rungler_amt", eng.chaos.level * 0.7)
+    params:set("chaos_amt", util.clamp(eng.chaos.level * 0.6, 0, 0.7))
+    -- cross-mod follows
+    params:set("xmod_lfo1_lfo2", eng.chaos.level * 0.4)
+  elseif mode == 2 then
+    -- SURGE: sudden chaos spikes, quick recovery
+    if math.random() < 0.2 then
+      -- SPIKE
+      params:set("chaos_amt", 0.5 + math.random() * 0.4)
+      params:set("rungler_amt", 0.4 + math.random() * 0.4)
+      params:set("bit_depth", 3 + math.random(5))
+    else
+      -- recover
+      params:set("chaos_amt", util.clamp(params:get("chaos_amt") - 0.05, 0, 1))
+      params:set("rungler_amt", util.clamp(params:get("rungler_amt") - 0.04, 0, 1))
+      params:set("bit_depth", util.clamp(params:get("bit_depth") + 0.5, 6, 16))
+    end
+  elseif mode == 3 then
+    -- GLITCH: constant micro-disruptions, bitcrush/sample rate jumps
+    params:set("bit_depth", 4 + math.random(8))
+    params:set("sample_rate", 2000 + math.random(30000))
+    if math.random() < 0.3 then
+      params:set("xmod_step_cutoff", math.random() * 0.5)
+    end
+    if math.random() < 0.2 then
+      params:set("xmod_chaos_pan", math.random() * 0.6)
+    end
+  elseif mode == 4 then
+    -- CALM: reduce all chaos toward zero
+    params:set("chaos_amt", util.clamp(params:get("chaos_amt") - 0.04, 0, 1))
+    params:set("rungler_amt", util.clamp(params:get("rungler_amt") - 0.03, 0, 1))
+    params:set("bit_depth", util.clamp(params:get("bit_depth") + 0.8, 10, 16))
+    params:set("sample_rate", util.clamp(params:get("sample_rate") + 2000, 10000, 44000))
+    params:set("xmod_lfo1_lfo2", util.clamp(params:get("xmod_lfo1_lfo2") - 0.03, 0, 1))
+    params:set("xmod_step_cutoff", util.clamp(params:get("xmod_step_cutoff") - 0.02, 0, 1))
+    params:set("xmod_chaos_pan", util.clamp(params:get("xmod_chaos_pan") - 0.02, 0, 1))
+  end
+end
+
+-- run all engineers (called from autopilot_evolve)
+local function engineers_tick()
+  engineer_conduct()   -- update shared awareness first
+  engineer_timbre()
+  engineer_filter()
+  engineer_rhythm()
+  engineer_space()
+  engineer_chaos()
+end
+
 ---------- AUTOPILOT ----------
 -- internal algorithmic brain: evolves melody, timbre, drums, fx over time
 -- cycles through phases: build → peak → deconstruct → minimal → rebuild
 
 local function autopilot_evolve()
   autopilot_tick = autopilot_tick + 1
+
+  -- run all engineers every tick
+  engineers_tick()
+
   local p = patterns[current_pattern]
   local scale_notes = musicutil.generate_scale(
     params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 4)
+  if not scale_notes or #scale_notes == 0 then
+    scale_notes = {}
+    for i = 0, 24 do table.insert(scale_notes, 48 + i) end
+  end
   local phase = autopilot_phase
   local progress = autopilot_tick / phase_lengths[phase]
 
@@ -2760,6 +3062,19 @@ function init()
     controlspec.new(0, 1, 'lin', 0.01, 0))
   params:add_control("xmod_chaos_pan", "CHAOS>PAN",
     controlspec.new(0, 1, 'lin', 0.01, 0))
+
+  -- engineers
+  params:add_group("ENGINEERS", 5)
+  params:add_option("eng_timbre", "timbre eng", ENG_TIMBRE_MODES, 1)
+  params:set_action("eng_timbre", function(x) eng.timbre.mode = x end)
+  params:add_option("eng_filter", "filter eng", ENG_FILTER_MODES, 1)
+  params:set_action("eng_filter", function(x) eng.filter.mode = x end)
+  params:add_option("eng_rhythm", "rhythm eng", ENG_RHYTHM_MODES, 1)
+  params:set_action("eng_rhythm", function(x) eng.rhythm.mode = x end)
+  params:add_option("eng_space", "space eng", ENG_SPACE_MODES, 1)
+  params:set_action("eng_space", function(x) eng.space.mode = x end)
+  params:add_option("eng_chaos", "chaos eng", ENG_CHAOS_MODES, 1)
+  params:set_action("eng_chaos", function(x) eng.chaos.mode = x end)
 
   -- save/load slots
   params:add_group("SAVE/LOAD", 3)
