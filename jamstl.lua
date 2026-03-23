@@ -1763,7 +1763,11 @@ function key(n, z)
     end
 
   elseif n == 3 and z == 1 then
-    if current_page == 1 then
+    if drop_active then
+      -- release drop from any page
+      macro_drop_toggle()
+
+    elseif current_page == 1 then
       -- SCRAMBLE: randomize pattern (melody notes + drum hits)
       save_snapshot()
       macro_scramble()
@@ -1974,17 +1978,16 @@ function draw_play_page()
     screen.fill()
   end
 
-  -- drop indicator
+  -- K3 hint / drop indicator
   if drop_active then
-    screen.level(15)
+    screen.level(math.floor(util.time() * 4) % 2 == 0 and 15 or 5)
     screen.move(0, 62)
-    screen.text(">> DROP <<")
+    screen.text(">> DROP << K3:release")
+  else
+    screen.level(3)
+    screen.move(90, 62)
+    screen.text("K3:scram")
   end
-
-  -- K3 hint
-  screen.level(3)
-  screen.move(90, 62)
-  screen.text("K3:scram")
 end
 
 function draw_sound_page()
