@@ -70,6 +70,9 @@ local autopilot_phase = 1
 local autopilot_tick = 0
 local PHASE_NAMES = {"BUILD", "PEAK", "BREAK", "SPACE"}
 local phase_lengths = {16, 8, 12, 10}
+-- forward declare autopilot functions (defined later, called from key())
+local start_autopilot
+local stop_autopilot
 
 -- macro state
 local macro_destroy_val = 0
@@ -1746,8 +1749,13 @@ function key(n, z)
       k2_down = false
       local held = util.time() - k2_held_time
       if held > 0.5 then
-        -- LONG PRESS: toggle autopilot
-        if autopilot_on then stop_autopilot() else start_autopilot() end
+        -- LONG PRESS: toggle autopilot (and start playing if not already)
+        if autopilot_on then
+          stop_autopilot()
+        else
+          if not playing then start_sequencer() end
+          start_autopilot()
+        end
       else
         -- SHORT PRESS: play/stop
         if playing then stop_sequencer() else start_sequencer() end
@@ -2464,7 +2472,7 @@ local function autopilot_evolve()
   screen_dirty = true
 end
 
-local function start_autopilot()
+start_autopilot = function()
   autopilot_on = true
   autopilot_tick = 0
   autopilot_phase = 1
@@ -2478,7 +2486,7 @@ local function start_autopilot()
   end)
 end
 
-local function stop_autopilot()
+stop_autopilot = function()
   autopilot_on = false
   if autopilot_clock_id then
     clock.cancel(autopilot_clock_id)
