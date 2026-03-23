@@ -25,7 +25,7 @@ local util = require "util"
 
 local NUM_STEPS = 16
 local NUM_PATTERNS = 8
-local PAGES = {"PLAY", "SOUND", "CHAOS", "FX", "TAPE", "MORPH"}
+local PAGES = {"PLAY", "SOUND", "CHAOS", "FX", "TAPE", "MORPH", "MACRO", "SCENE"}
 local WAVE_NAMES = {"saw", "pulse", "tri", "noise"}
 local SCALE_NAMES = {"Major", "Natural Minor", "Dorian", "Phrygian",
   "Mixolydian", "Major Pentatonic", "Minor Pentatonic", "Chromatic"}
@@ -147,7 +147,7 @@ local brain = {
   response_type = 1,      -- 1=invert, 2=retrograde, 3=transpose, 4=augment
 
   -- dramatic silence
-  silence_timer = 0,      -- counts down bars until next silence event
+  silence_timer = 8,      -- counts down phrases until next silence (start high to avoid instant silence)
   in_silence = false,     -- currently in a dramatic pause
   silence_steps = 0,      -- how many steps of silence remain
   sustain_note = nil,     -- note being held during a sustain moment
@@ -368,6 +368,242 @@ local function brain_recall_motif()
   end
 end
 
+---------- MARKOV MELODIES ----------
+
+local markov = {}  -- transition table: markov[from_note][to_note] = count
+local markov_total = {} -- markov_total[from_note] = total_transitions
+local markov_last_note = nil
+local markov_learning = true  -- always learning from what plays
+local MARKOV_READY_THRESHOLD = 64  -- start using after this many transitions
+
+local function markov_record(note)
+  if not markov_last_note then
+    markov_last_note = note
+    return
+  end
+  local from = markov_last_note
+  if not markov[from] then markov[from] = {} end
+  markov[from][note] = (markov[from][note] or 0) + 1
+  markov_total[from] = (markov_total[from] or 0) + 1
+  markov_last_note = note
+end
+
+local function markov_generate(current_note, scale_notes)
+  if not markov[current_note] or not markov_total[current_note] then return nil end
+  if markov_total[current_note] < 3 then return nil end
+
+  -- weighted random selection
+  local r = math.random() * markov_total[current_note]
+  local cumulative = 0
+  for to_note, count in pairs(markov[current_note]) do
+    cumulative = cumulative + count
+    if cumulative >= r then
+      return snap_to_scale(to_note, scale_notes)
+    end
+  end
+  return nil
+end
+
+local function markov_transitions_total()
+  local total = 0
+  for _, t in pairs(markov_total) do total = total + t end
+  return total
+end
+
+---------- AUDIO REACTIVE ----------
+
+local audio_level = 0
+local audio_level_smooth = 0
+
+local function update_audio_reactive()
+  -- poll audio input level (smoothed)
+  audio_level_smooth = audio_level_smooth * 0.85 + audio_level * 0.15
+
+  local react_amt = 0
+  if params and params.lookup and params.lookup["audio_react_amt"] then
+    react_amt = params:get("audio_react_amt")
+  end
+  if react_amt < 0.01 then return end
+
+  local target = 1
+  if params and params.lookup and params.lookup["audio_react_target"] then
+    target = params:get("audio_react_target")
+  end
+  local mod = audio_level_smooth * react_amt
+
+  if target == 1 then      -- cutoff
+    local base = params:get("cutoff")
+    engine.cutoff(util.clamp(base + mod * 8000, 20, 18000))
+  elseif target == 2 then  -- chaos
+    params:set("chaos_amt", util.clamp(mod, 0, 1))
+  elseif target == 3 then  -- bit depth
+    local base = params:get("bit_depth")
+    engine.bits(util.clamp(base - mod * 12, 1, 16))
+  elseif target == 4 then  -- delay mix
+    params:set("delay_mix", util.clamp(mod * 0.8, 0, 1))
+  end
+end
+
+---------- PSET SCENES ----------
+
+local scenes = {nil, nil, nil, nil}  -- 4 scene slots
+local scene_crossfade = 0  -- 0-1: 0=scene A, 1=scene B
+local scene_a = 1
+local scene_b = 2
+local SCENE_PARAMS = {"cutoff", "res", "fm_amt", "fm_ratio", "bit_depth", "sample_rate",
+  "chaos_amt", "lfo1_rate", "lfo2_rate", "env_attack", "env_decay", "env_sustain",
+  "env_release", "kick_tune", "kick_decay", "hat_decay", "delay_time", "delay_fb",
+  "delay_mix", "delay_bits", "reverb_mix", "reverb_size", "pw", "sub_amt", "noise_amt",
+  "gate_length", "note_drift", "pan"}
+
+local function scene_save(slot)
+  scenes[slot] = {}
+  for _, pid in ipairs(SCENE_PARAMS) do
+    if params.lookup[pid] then
+      scenes[slot][pid] = params:get(pid)
+    end
+  end
+end
+
+local function scene_crossfade_apply(amount)
+  if not scenes[scene_a] or not scenes[scene_b] then return end
+  for _, pid in ipairs(SCENE_PARAMS) do
+    local va = scenes[scene_a][pid]
+    local vb = scenes[scene_b][pid]
+    if va and vb then
+      params:set(pid, va + (vb - va) * amount)
+    end
+  end
+end
+
+---------- GRID TRANSFORMATIONS ----------
+
+local transform_held = false  -- true when grid transform button is held
+
+local function transform_reverse()
+  local p = patterns[current_pattern]
+  local notes = {}
+  for i = 1, p.length do
+    if p.melody[i].on then table.insert(notes, p.melody[i].note) end
+  end
+  local rev = {}
+  for i = #notes, 1, -1 do table.insert(rev, notes[i]) end
+  local idx = 1
+  for i = 1, p.length do
+    if p.melody[i].on and idx <= #rev then
+      p.melody[i].note = rev[idx]
+      idx = idx + 1
+    end
+  end
+end
+
+local function transform_invert()
+  local p = patterns[current_pattern]
+  local root = params:get("root_note")
+  for i = 1, p.length do
+    if p.melody[i].on then
+      local interval = p.melody[i].note - root
+      p.melody[i].note = root - interval
+    end
+  end
+end
+
+local function transform_rotate(dir)
+  local p = patterns[current_pattern]
+  local notes = {}
+  for i = 1, p.length do table.insert(notes, p.melody[i].note) end
+  local shifted = {}
+  for i = 1, p.length do
+    shifted[i] = notes[((i - 1 + dir) % p.length) + 1]
+  end
+  for i = 1, p.length do p.melody[i].note = shifted[i] end
+end
+
+local function transform_mirror()
+  local p = patterns[current_pattern]
+  local half = math.floor(p.length / 2)
+  for i = 1, half do
+    local j = p.length - i + 1
+    p.melody[i].note, p.melody[j].note = p.melody[j].note, p.melody[i].note
+    p.melody[i].on, p.melody[j].on = p.melody[j].on, p.melody[i].on
+  end
+end
+
+local function transform_augment()
+  local p = patterns[current_pattern]
+  for i = 1, p.length do
+    if p.melody[i].on then p.melody[i].gate = math.min(p.melody[i].gate * 1.5, 1.0) end
+  end
+end
+
+local function transform_diminish()
+  local p = patterns[current_pattern]
+  for i = 1, p.length do
+    if p.melody[i].on then p.melody[i].gate = math.max(p.melody[i].gate * 0.5, 0.1) end
+  end
+end
+
+---------- POLYRHYTHMIC VOICES ----------
+
+local poly_voices = {
+  {step = 0, length = 12, active = false, notes = {}},  -- voice 2
+  {step = 0, length = 7, active = false, notes = {}},   -- voice 3
+}
+
+local function init_poly_voices()
+  for v = 1, 2 do
+    poly_voices[v].notes = {}
+    for i = 1, 16 do
+      poly_voices[v].notes[i] = {on = false, note = 60, vel = 0.6}
+    end
+  end
+end
+
+local function advance_poly_voices(beat_dur)
+  for v = 1, 2 do
+    local voice = poly_voices[v]
+    if voice.active then
+      voice.step = (voice.step % voice.length) + 1
+      local s = voice.notes[voice.step]
+      if s and s.on then
+        local gate = beat_dur * 0.5 * params:get("gate_length")
+        play_note(s.note, s.vel * 0.7, gate)
+      end
+    end
+  end
+end
+
+---------- PERFORMANCE MACROS ----------
+
+local MACRO_NAMES = {"DARKNESS", "ENERGY", "SPACE", "ACID"}
+local macro_values = {0, 0, 0, 0}
+local macro_active = 0  -- which macro is being controlled (0=none)
+
+local function apply_macro(idx, val)
+  macro_values[idx] = val
+  if idx == 1 then      -- DARKNESS: cutoff down, reverb up, bits down, gate up
+    params:set("cutoff", 2000 - val * 1800)
+    params:set("reverb_mix", 0.1 + val * 0.6)
+    params:set("bit_depth", 12 - val * 8)
+    params:set("gate_length", 1.0 + val * 0.8)
+  elseif idx == 2 then  -- ENERGY: chaos up, hat density up, FM up, attack short
+    params:set("chaos_amt", val * 0.8)
+    params:set("hat_density", val * 0.7)
+    params:set("fm_amt", val * 1.5)
+    params:set("env_attack", 0.005 - val * 0.004)
+  elseif idx == 3 then  -- SPACE: delay mix up, reverb up, pan wider, tape wow
+    params:set("delay_mix", val * 0.7)
+    params:set("reverb_mix", val * 0.5)
+    params:set("pan", (math.sin(util.time() * 2) * val * 0.8))
+    params:set("tape_wow", val * 0.4)
+  elseif idx == 4 then  -- ACID: cutoff sweep, res up, decay short, attack short
+    params:set("cutoff", 200 + val * 8000)
+    params:set("res", 0.3 + val * 2.5)
+    params:set("env_decay", 0.3 - val * 0.2)
+    params:set("env_attack", 0.005)
+  end
+end
+
 ---------- PATTERN SAVE/LOAD ----------
 
 local DATA_DIR = _path.data .. "jamstl/"
@@ -392,6 +628,9 @@ local function save_patterns()
         gate = p.melody[j].gate,
         prob = p.melody[j].prob,
         chaos = p.melody[j].chaos,
+        ratchet = p.melody[j].ratchet or 1,
+        cond = p.melody[j].cond or 1,
+        microtune = p.melody[j].microtune or 0,
       }
       pd.kick[j] = p.kick[j]
       pd.hat[j] = p.hat[j]
@@ -418,6 +657,9 @@ local function load_patterns()
               patterns[i].melody[j].gate = pd.melody[j].gate or 0.5
               patterns[i].melody[j].prob = pd.melody[j].prob or 100
               patterns[i].melody[j].chaos = pd.melody[j].chaos or 0
+              patterns[i].melody[j].ratchet = pd.melody[j].ratchet or 1
+              patterns[i].melody[j].cond = pd.melody[j].cond or 1
+              patterns[i].melody[j].microtune = pd.melody[j].microtune or 0
             end
             if pd.kick then patterns[i].kick[j] = pd.kick[j] or false end
             if pd.hat then patterns[i].hat[j] = pd.hat[j] or false end
@@ -630,8 +872,17 @@ end
 
 ---------- PATTERN DATA ----------
 
+-- condition names for display
+local COND_NAMES = {"---", "FILL", "NEI", "1:2", "1:3", "1:4", "NOT"}
+local loop_count = 0  -- tracks how many times the pattern has looped
+
 local function new_step()
-  return {on = false, note = 60, vel = 0.8, gate = 0.5, prob = 100, chaos = 0}
+  return {
+    on = false, note = 60, vel = 0.8, gate = 0.5, prob = 100, chaos = 0,
+    ratchet = 1,    -- 1=normal, 2=double, 3=triple, 4=quad
+    cond = 1,       -- index into COND_NAMES: 1=always, 2=FILL, 3=NEI, 4=1:2, 5=1:3, 6=1:4, 7=NOT
+    microtune = 0,  -- cents offset: -50 to +50
+  }
 end
 
 local function new_pattern()
@@ -868,6 +1119,9 @@ local function load_from_slot(slot)
               patterns[i].melody[j].gate = pd.melody[j].gate or 0.5
               patterns[i].melody[j].prob = pd.melody[j].prob or 100
               patterns[i].melody[j].chaos = pd.melody[j].chaos or 0
+              patterns[i].melody[j].ratchet = pd.melody[j].ratchet or 1
+              patterns[i].melody[j].cond = pd.melody[j].cond or 1
+              patterns[i].melody[j].microtune = pd.melody[j].microtune or 0
             end
             if pd.kick then patterns[i].kick[j] = pd.kick[j] or false end
             if pd.hat then patterns[i].hat[j] = pd.hat[j] or false end
@@ -1044,6 +1298,12 @@ local function advance_step()
   local rung_amt = params:get("rungler_amt")
   local rung_norm = rungler_value / 255
 
+  -- track loop count for conditional triggers
+  if current_step == 1 then loop_count = loop_count + 1 end
+
+  -- check if previous step's melody played (for NEI/NOT conditions)
+  local prev_melody_played = brain.history[brain.history_pos] and brain.history[brain.history_pos].played or false
+
   -- ===== MELODY (with musical brain) =====
   local melody_played = false
   local played_note = nil
@@ -1101,6 +1361,12 @@ local function advance_step()
         scale_notes = {note}
       end
 
+      -- MARKOV: occasionally use learned melody (when enough data + autopilot)
+      if autopilot_on and markov_transitions_total() > MARKOV_READY_THRESHOLD and math.random() < 0.25 then
+        local markov_note = markov_generate(note, scale_notes)
+        if markov_note then note = markov_note end
+      end
+
       -- CALL & RESPONSE: override note if in response mode
       if brain.responding and autopilot_on then
         local resp_note = brain_get_response_note(note, brain.phrase_step, scale_notes)
@@ -1142,10 +1408,52 @@ local function advance_step()
         engine.cutoff(util.clamp(params:get("cutoff") + cut_mod, 20, 18000))
       end
 
-      local gate = beat_dur * step.gate * 2 * params:get("gate_length")
-      play_note(note, vel, gate)
-      melody_played = true
-      played_note = note
+      -- CONDITIONAL TRIGGERS: check step condition
+      local cond = step.cond or 1
+      local cond_pass = true
+      if cond == 2 then      -- FILL: only when chaos button held
+        cond_pass = chaos_held
+      elseif cond == 3 then  -- NEI: only if previous step's melody played
+        cond_pass = prev_melody_played
+      elseif cond == 4 then  -- 1:2: every 2nd loop
+        cond_pass = (loop_count % 2 == 0)
+      elseif cond == 5 then  -- 1:3: every 3rd loop
+        cond_pass = (loop_count % 3 == 0)
+      elseif cond == 6 then  -- 1:4: every 4th loop
+        cond_pass = (loop_count % 4 == 0)
+      elseif cond == 7 then  -- NOT: only if previous didn't play
+        cond_pass = not prev_melody_played
+      end
+
+      if cond_pass then
+        -- MICROTUNING: apply per-step pitch offset in cents
+        local micro = (step.microtune or 0) + (params:get("microtune_amt") or 0)
+        local base_freq = musicutil.note_num_to_freq(note)
+        if math.abs(micro) > 0.5 then
+          -- detune: freq * 2^(cents/1200)
+          local detuned_freq = base_freq * math.pow(2, micro / 1200)
+          engine.note_on(note, detuned_freq, vel)
+        end
+
+        -- RATCHETING: repeat note within the step's time
+        local ratchet = step.ratchet or 1
+        local gate = beat_dur * step.gate * 2 * params:get("gate_length")
+        if ratchet > 1 then
+          local ratch_gate = gate / ratchet * 0.8
+          for r = 1, ratchet do
+            clock.run(function()
+              clock.sleep(beat_dur * (r - 1) / ratchet)
+              play_note(note, vel * (r == 1 and 1.0 or 0.7), ratch_gate)
+            end)
+          end
+        else
+          play_note(note, vel, gate)
+        end
+        melody_played = true
+        played_note = note
+        -- MARKOV: record transition
+        markov_record(note)
+      end
     end
     if total_chaos > 0 then
       engine.chaos(params:get("chaos_amt"))
@@ -1251,6 +1559,9 @@ local function advance_step()
   -- BRAIN: record what happened this step
   brain_record_step(melody_played, played_note, step.vel, kick_played, hat_played)
 
+  -- POLYRHYTHMIC VOICES: advance independent counters
+  advance_poly_voices(beat_dur)
+
   -- CROSS-MOD: step-based modulations
   apply_cross_mod()
 
@@ -1354,12 +1665,25 @@ g.key = function(x, y, z)
 
     -- ROW 4: per-step chaos (cycle 0 > 0.3 > 0.6 > 1.0)
     elseif y == 4 and x <= p.length then
-      local c = p.melody[x].chaos
-      if c < 0.1 then c = 0.3
-      elseif c < 0.4 then c = 0.6
-      elseif c < 0.7 then c = 1.0
-      else c = 0 end
-      p.melody[x].chaos = c
+      if held_step > 0 and held_step == x then
+        -- RATCHET: cycle 1>2>3>4>1 when holding step + pressing row 4
+        local r = p.melody[x].ratchet or 1
+        r = (r % 4) + 1
+        p.melody[x].ratchet = r
+      elseif held_step > 0 then
+        -- CONDITION: cycle trigger condition when holding different step
+        local c = p.melody[held_step].cond or 1
+        c = (c % #COND_NAMES) + 1
+        p.melody[held_step].cond = c
+      else
+        -- per-step chaos (normal behavior)
+        local c = p.melody[x].chaos
+        if c < 0.1 then c = 0.3
+        elseif c < 0.4 then c = 0.6
+        elseif c < 0.7 then c = 1.0
+        else c = 0 end
+        p.melody[x].chaos = c
+      end
 
     -- ROWS 5-7: keyboard
     elseif y >= 5 and y <= 7 then
@@ -1626,19 +1950,22 @@ end
 local function macro_drop_toggle()
   if not drop_active then
     -- save and kill
+    drop_saved = {
+      cutoff = params:get("cutoff"),
+      probability = params:get("probability"),
+      delay_mix = params:get("delay_mix"),
+    }
     drop_active = true
-    drop_saved.cutoff = params:get("cutoff")
-    drop_saved.probability = params:get("probability")
-    drop_saved.delay_mix = params:get("delay_mix")
     params:set("cutoff", 300)
     params:set("probability", 20)
     params:set("delay_mix", 0.6)
   else
     -- restore with a bump
     drop_active = false
-    params:set("cutoff", drop_saved.cutoff or 2000)
-    params:set("probability", drop_saved.probability or 100)
-    params:set("delay_mix", drop_saved.delay_mix or 0.2)
+    params:set("cutoff", (drop_saved and drop_saved.cutoff) or 2000)
+    params:set("probability", (drop_saved and drop_saved.probability) or 100)
+    params:set("delay_mix", (drop_saved and drop_saved.delay_mix) or 0.2)
+    drop_saved = nil
   end
 end
 
@@ -1646,7 +1973,7 @@ end
 
 function enc(n, d)
   if n == 1 then
-    current_page = util.clamp(current_page + (d > 0 and 1 or -1), 1, 6)
+    current_page = util.clamp(current_page + (d > 0 and 1 or -1), 1, #PAGES)
 
   elseif current_page == 1 then
     -- PLAY: E2 = tempo, E3 = MUTATE melody
@@ -1762,6 +2089,27 @@ function enc(n, d)
         apply_morph(new_m)
       end
     end
+
+  elseif current_page == 7 then
+    -- MACRO: E2 = select macro, E3 = control macro value
+    if n == 2 then
+      macro_active = util.clamp(macro_active + (d > 0 and 1 or -1), 1, 4)
+    elseif n == 3 then
+      if macro_active > 0 then
+        local val = util.clamp(macro_values[macro_active] + d * 0.03, 0, 1)
+        apply_macro(macro_active, val)
+      end
+    end
+
+  elseif current_page == 8 then
+    -- SCENE: E2 = select scene A/B, E3 = crossfade between scenes
+    if n == 2 then
+      -- cycle through scenes for A or B
+      scene_a = util.clamp(scene_a + (d > 0 and 1 or -1), 1, 4)
+    elseif n == 3 then
+      scene_crossfade = util.clamp(scene_crossfade + d * 0.03, 0, 1)
+      scene_crossfade_apply(scene_crossfade)
+    end
   end
 
   screen_dirty = true
@@ -1846,7 +2194,17 @@ function key(n, z)
     elseif current_page == 6 then
       -- MORPH: capture snapshot for morphing
       capture_morph_snapshot()
-      screen_dirty = true
+
+    elseif current_page == 7 then
+      -- MACRO: reset active macro to 0
+      if macro_active > 0 then
+        apply_macro(macro_active, 0)
+      end
+
+    elseif current_page == 8 then
+      -- SCENE: save current state to scene slot (cycles A-D)
+      local slot = ((scene_a - 1 + 1) % 4) + 1  -- next slot after A
+      scene_save(slot)
     end
   end
   screen_dirty = true
@@ -1871,6 +2229,10 @@ function redraw()
     draw_tape_page()
   elseif current_page == 6 then
     draw_morph_page()
+  elseif current_page == 7 then
+    draw_macro_page()
+  elseif current_page == 8 then
+    draw_scene_page()
   end
 
   -- chaos particles overlay
@@ -1882,17 +2244,17 @@ function redraw()
     end
   end
 
-  -- AUTOPILOT indicator — top right, compact
+  -- AUTOPILOT indicator — visible on ALL pages, top-right corner, pulsing
   if autopilot_on then
-    local pulse = math.floor(8 + math.sin(util.time() * 4) * 7)
+    local pulse = math.floor(8 + math.sin(util.time() * 3) * 7)
     screen.level(pulse)
     screen.font_size(8)
-    screen.move(104, 7)
-    screen.text("A")
-    -- phase progress dot
+    screen.move(108, 7)
+    screen.text("AUTO")
+    -- phase indicator bar below
     screen.level(6)
-    local phase_pct = autopilot_tick / (phase_lengths[autopilot_phase] or 12)
-    screen.rect(116, 2, math.floor(phase_pct * 10), 3)
+    local phase_pct = autopilot_tick / math.max(1, phase_lengths[autopilot_phase] or 12)
+    screen.rect(108, 9, math.floor(phase_pct * 20), 2)
     screen.fill()
   end
 
@@ -1913,7 +2275,7 @@ function draw_play_page()
   screen.move(56, 7)
   screen.text(string.format("%d", params:get("clock_tempo")))
   screen.level(7)
-  screen.move(90, 7)
+  screen.move(80, 7)
   screen.text("P" .. current_pattern)
 
   -- step boxes
@@ -2337,6 +2699,94 @@ function draw_morph_page()
       screen.text(entry.pattern)
     end
   end
+end
+
+---------- DRAW: MACRO PAGE ----------
+
+function draw_macro_page()
+  screen.level(15)
+  screen.font_size(8)
+  screen.move(0, 7)
+  screen.text("MACRO")
+
+  for i = 1, 4 do
+    local y = 8 + i * 12
+    local is_active = (macro_active == i)
+    screen.level(is_active and 15 or 5)
+    screen.move(0, y)
+    screen.text(MACRO_NAMES[i])
+
+    -- value bar
+    screen.level(is_active and 12 or 3)
+    screen.rect(50, y - 6, 70, 7)
+    screen.stroke()
+    local val = macro_values[i]
+    if val > 0.01 then
+      screen.level(is_active and 15 or 8)
+      screen.rect(51, y - 5, math.floor(val * 68), 5)
+      screen.fill()
+    end
+    screen.level(7)
+    screen.move(122, y)
+    screen.text(string.format("%.0f", val * 100))
+  end
+
+  screen.level(3)
+  screen.move(0, 62)
+  screen.text("E2:select  E3:control  K3:reset")
+end
+
+---------- DRAW: SCENE PAGE ----------
+
+function draw_scene_page()
+  screen.level(15)
+  screen.font_size(8)
+  screen.move(0, 7)
+  screen.text("SCENE")
+
+  -- scene slots
+  for i = 1, 4 do
+    local x = (i - 1) * 32
+    local label = string.char(64 + i)  -- A, B, C, D
+    local saved = scenes[i] ~= nil
+    screen.level(saved and 10 or 3)
+    screen.rect(x, 14, 28, 12)
+    if i == scene_a then
+      screen.fill()
+      screen.level(0)
+    elseif i == scene_b then
+      screen.stroke()
+      screen.level(12)
+    else
+      screen.stroke()
+      screen.level(saved and 7 or 3)
+    end
+    screen.move(x + 10, 24)
+    screen.text(label)
+  end
+
+  -- crossfade bar
+  screen.level(7)
+  screen.move(0, 36)
+  screen.text("E3: xfade  " .. string.char(64 + scene_a) .. " > " .. string.char(64 + scene_b))
+  screen.level(3)
+  screen.rect(0, 39, 128, 8)
+  screen.stroke()
+  screen.level(12)
+  local xf_x = math.floor(scene_crossfade * 126)
+  screen.rect(xf_x, 39, 3, 8)
+  screen.fill()
+
+  -- labels
+  screen.level(4)
+  screen.move(0, 55)
+  screen.text("E2:slot  K3:save next  K2:toggle A/B")
+
+  -- markov stats
+  screen.level(3)
+  screen.move(0, 63)
+  local mt = markov_transitions_total()
+  screen.text("markov:" .. mt .. (mt > MARKOV_READY_THRESHOLD and " (active)" or ""))
 end
 
 ---------- ENGINEERS ----------
@@ -3131,6 +3581,31 @@ function init()
     end
   end)
 
+  -- microtuning
+  params:add_group("MICROTUNING", 1)
+  params:add_control("microtune_amt", "global microtune",
+    controlspec.new(-50, 50, 'lin', 1, 0, "cents"))
+
+  -- audio reactive
+  params:add_group("AUDIO REACT", 2)
+  params:add_control("audio_react_amt", "react amount",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_option("audio_react_target", "react target", {"cutoff", "chaos", "bitdepth", "delay"}, 1)
+
+  -- polyrhythmic voices
+  params:add_group("POLY VOICES", 4)
+  params:add_option("voice2_active", "voice 2", {"off", "on"}, 1)
+  params:set_action("voice2_active", function(x) poly_voices[1].active = (x == 2) end)
+  params:add_number("voice2_length", "voice 2 length", 3, 16, 12)
+  params:set_action("voice2_length", function(x) poly_voices[1].length = x end)
+  params:add_option("voice3_active", "voice 3", {"off", "on"}, 1)
+  params:set_action("voice3_active", function(x) poly_voices[2].active = (x == 2) end)
+  params:add_number("voice3_length", "voice 3 length", 3, 16, 7)
+  params:set_action("voice3_length", function(x) poly_voices[2].length = x end)
+
+  -- init poly voice notes from current scale
+  init_poly_voices()
+
   -- init keyboard
   update_keyboard()
 
@@ -3180,6 +3655,7 @@ function init()
   screen_metro.event = function()
     update_particles()
     opxy_sync_params()
+    update_audio_reactive()
     -- tape wow/flutter
     if tape_playing then
       local wow = params:get("tape_wow")
@@ -3214,6 +3690,14 @@ function init()
       end
     end
   end)
+
+  -- audio input level poll for audio reactive
+  local audio_poll = poll.set("amp_in_l")
+  audio_poll.callback = function(val)
+    audio_level = val
+  end
+  audio_poll.time = 0.05
+  audio_poll:start()
 
   -- initial param push to engine
   params:bang()

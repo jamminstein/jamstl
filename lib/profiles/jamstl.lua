@@ -646,5 +646,51 @@ return {
       range_hi = 4,
       euclidean_pulses = 3,
     },
+
+    ---------- MICROTUNING ----------
+
+    microtune_amt = {
+      group = "timbral",
+      weight = 0.4,
+      sensitivity = 0.3,
+      direction = "both",
+      range_lo = -25,
+      range_hi = 25,
+      euclidean_pulses = 5,
+    },
+
+    ---------- AUDIO REACTIVE ----------
+
+    audio_react_amt = {
+      group = "timbral",
+      weight = 0.3,
+      sensitivity = 0.3,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.5,
+      euclidean_pulses = 3,
+    },
+
+    ---------- POLY VOICES ----------
+
+    voice2_length = {
+      group = "structural",
+      weight = 0.3,
+      sensitivity = 0.3,
+      direction = "both",
+      range_lo = 5,
+      range_hi = 15,
+      euclidean_pulses = 3,
+    },
+
+    voice3_length = {
+      group = "structural",
+      weight = 0.3,
+      sensitivity = 0.3,
+      direction = "both",
+      range_lo = 3,
+      range_hi = 13,
+      euclidean_pulses = 3,
+    },
   },
 }
