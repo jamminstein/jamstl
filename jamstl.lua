@@ -25,7 +25,7 @@ local util = require "util"
 
 local NUM_STEPS = 16
 local NUM_PATTERNS = 8
-local PAGES = {"PLAY", "SOUND", "CHAOS", "FX"}
+local PAGES = {"PLAY", "SOUND", "CHAOS", "FX", "TAPE", "MORPH"}
 local WAVE_NAMES = {"saw", "pulse", "tri", "noise"}
 local SCALE_NAMES = {"major", "natural_minor", "dorian", "phrygian",
   "mixolydian", "pentatonic_maj", "pentatonic_min", "chromatic"}
@@ -80,6 +80,47 @@ local snapshot = nil
 local k2_held_time = 0
 local k2_down = false
 
+-- rungler (kastle shift register)
+local rungler_register = {0, 0, 1, 0, 1, 1, 0, 1}  -- seed with some bits
+local rungler_value = 0
+local rungler_step_count = 0
+
+-- xor drums (bitranger)
+local XOR_NAMES = {"OFF", "XOR", "AND", "OR", "NAND"}
+local xor_shadow_kick = {}
+local xor_shadow_hat = {}
+
+-- pattern chaining
+local chain = {}
+local chain_pos = 1
+local chain_bar = 0
+local chain_mode = false
+local chain_edit_held = false
+local chain_hold_time = 0
+
+-- pattern morph
+local pattern_morph_a = 1
+local pattern_morph_b = 2
+
+-- snapshot morph
+local morph_snapshot = nil
+local morph_base = nil
+
+-- tape (softcut)
+local tape_mode = 1  -- 1=PLAY, 2=REC, 3=CHOP
+local TAPE_MODES = {"PLAY", "REC", "CHOP"}
+local tape_speed = 1.0
+local tape_rec_length = 0
+local tape_recording = false
+local tape_playing = false
+local tape_phase = 0
+local tape_chop_slices = 8
+local tape_chop_sel = 1
+local TAPE_BUF_SEC = 16
+
+-- cross modulation
+local XMOD_NAMES = {"LFO1>LFO2", "STEP>CUT", "NOTE>DLY", "CHAOS>PAN"}
+
 -- clocks
 local seq_clock_id
 local grid_clock_id
@@ -113,6 +154,199 @@ local function euclidean(n, k, offset)
     end
   end
   return pattern
+end
+
+---------- RUNGLER ----------
+
+local function rungler_clock()
+  rungler_step_count = rungler_step_count + 1
+  local div = 1
+  if params and params.lookup and params.lookup["rungler_clock_div"] then
+    div = ({1, 2, 4, 8})[params:get("rungler_clock_div")]
+  end
+  if rungler_step_count % div ~= 0 then return end
+  -- feedback: XOR of bits 5 and 8
+  local new_bit = (rungler_register[5] + rungler_register[8]) % 2
+  -- shift left
+  for i = 8, 2, -1 do
+    rungler_register[i] = rungler_register[i - 1]
+  end
+  rungler_register[1] = new_bit
+  -- compute value 0-255
+  rungler_value = 0
+  for i = 1, 8 do
+    rungler_value = rungler_value + rungler_register[i] * (2 ^ (i - 1))
+  end
+end
+
+---------- XOR DRUMS ----------
+
+local function update_xor_shadows()
+  local kf = params and params:get("xor_kick_fills") or 5
+  local hf = params and params:get("xor_hat_fills") or 7
+  xor_shadow_kick = euclidean(16, kf, 0)
+  xor_shadow_hat = euclidean(16, hf, 3)
+end
+
+local function apply_xor_logic(main_hit, shadow_hit, mode)
+  if mode == 1 then return main_hit end  -- OFF
+  local a = main_hit and 1 or 0
+  local b = shadow_hit and 1 or 0
+  if mode == 2 then return ((a + b) % 2) == 1      -- XOR
+  elseif mode == 3 then return (a * b) == 1          -- AND
+  elseif mode == 4 then return (a + b) >= 1           -- OR
+  elseif mode == 5 then return (a * b) ~= 1           -- NAND
+  end
+  return main_hit
+end
+
+---------- SNAPSHOT MORPH ----------
+
+local MORPH_PARAMS = {"cutoff", "res", "bit_depth", "sample_rate", "fm_amt",
+  "chaos_amt", "delay_mix", "delay_fb", "delay_time", "delay_bits",
+  "gate_length", "kick_density", "hat_density", "hat_variety",
+  "reverb_mix", "reverb_size", "lfo1_rate", "lfo2_rate"}
+
+local function capture_morph_snapshot()
+  morph_snapshot = {}
+  morph_base = {}
+  for _, k in ipairs(MORPH_PARAMS) do
+    morph_snapshot[k] = params:get(k)
+    morph_base[k] = params:get(k)
+  end
+end
+
+local function apply_morph(amt)
+  if not morph_snapshot or not morph_base then return end
+  for _, k in ipairs(MORPH_PARAMS) do
+    local v = morph_base[k] + (morph_snapshot[k] - morph_base[k]) * amt
+    params:set(k, v)
+  end
+end
+
+---------- PATTERN MORPH ----------
+
+local function get_morphed_data(step_idx)
+  local m = params:get("pattern_morph_amt")
+  local pa = patterns[pattern_morph_a]
+  local pb = patterns[pattern_morph_b]
+  if not pa or not pb then return nil end
+  local len = math.max(pa.length, pb.length)
+  if step_idx > len then return nil end
+
+  if m <= 0.01 then
+    return pa.melody[step_idx], pa.kick[step_idx], pa.hat[step_idx]
+  end
+  if m >= 0.99 then
+    return pb.melody[step_idx], pb.kick[step_idx], pb.hat[step_idx]
+  end
+
+  -- dice per step: use A or B?
+  local use_b = math.random() < m
+  local src = use_b and pb or pa
+
+  -- blend continuous values
+  local step = {
+    on = src.melody[step_idx].on,
+    note = src.melody[step_idx].note,
+    vel = pa.melody[step_idx].vel * (1 - m) + pb.melody[step_idx].vel * m,
+    gate = pa.melody[step_idx].gate * (1 - m) + pb.melody[step_idx].gate * m,
+    prob = src.melody[step_idx].prob,
+    chaos = pa.melody[step_idx].chaos * (1 - m) + pb.melody[step_idx].chaos * m,
+  }
+  local kick = (math.random() < m) and pb.kick[step_idx] or pa.kick[step_idx]
+  local hat = (math.random() < m) and pb.hat[step_idx] or pa.hat[step_idx]
+  return step, kick, hat
+end
+
+---------- CROSS-MODULATION ----------
+
+local function apply_cross_mod()
+  -- LFO1 -> LFO2 rate (continuous)
+  local d1 = params:get("xmod_lfo1_lfo2")
+  if d1 > 0.01 then
+    local lfo1_val = math.sin(util.time() * params:get("lfo1_rate") * 2 * math.pi)
+    local new_rate = params:get("lfo2_rate") + lfo1_val * d1 * 8
+    engine.lfo2_rate(util.clamp(new_rate, 0.01, 20))
+  end
+
+  -- STEP -> CUTOFF (per step, creates filter sweeps)
+  local d2 = params:get("xmod_step_cutoff")
+  if d2 > 0.01 and current_step > 0 then
+    local step_norm = current_step / 16
+    local cut_base = params:get("cutoff")
+    local cut_mod = (step_norm - 0.5) * d2 * 8000
+    engine.cutoff(util.clamp(cut_base + cut_mod, 20, 18000))
+  end
+
+  -- NOTE -> DELAY TIME (per step, pitch-tracking echoes)
+  local d3 = params:get("xmod_note_delay")
+  if d3 > 0.01 and current_step > 0 then
+    local p = patterns[current_pattern]
+    if p.melody[current_step].on then
+      local note = p.melody[current_step].note
+      local note_norm = (note - 36) / 48
+      local dly_mod = note_norm * d3 * 0.5
+      engine.delay_time(util.clamp(params:get("delay_time") + dly_mod, 0.01, 1.5))
+    end
+  end
+
+  -- CHAOS -> PAN (continuous, stereo scatter)
+  local d4 = params:get("xmod_chaos_pan")
+  if d4 > 0.01 then
+    local chaos = params:get("chaos_amt")
+    local pan_mod = (math.random() - 0.5) * chaos * d4 * 1.6
+    engine.pan(util.clamp(params:get("pan") + pan_mod, -1, 1))
+  end
+end
+
+---------- TAPE HELPERS ----------
+
+local function tape_start_rec()
+  tape_recording = true
+  tape_rec_length = 0
+  softcut.buffer_clear_region(1, 0, TAPE_BUF_SEC)
+  softcut.position(1, 0)
+  softcut.rec(1, 1)
+  softcut.play(1, 1)
+  tape_mode = 2
+end
+
+local function tape_stop_rec()
+  tape_recording = false
+  softcut.rec(1, 0)
+  softcut.play(1, 0)
+  if tape_rec_length < 0.1 then tape_rec_length = TAPE_BUF_SEC end
+  softcut.loop_end(2, tape_rec_length)
+end
+
+local function tape_start_play()
+  tape_playing = true
+  softcut.position(2, 0)
+  softcut.rate(2, params:get("tape_speed"))
+  softcut.level(2, params:get("tape_mix"))
+  softcut.loop(2, 1)
+  softcut.play(2, 1)
+  tape_mode = 1
+end
+
+local function tape_stop_play()
+  tape_playing = false
+  softcut.play(2, 0)
+end
+
+local function tape_enter_chop()
+  tape_mode = 3
+  tape_chop_sel = 1
+  -- loop within first slice
+  if tape_rec_length > 0 then
+    local slice_len = tape_rec_length / tape_chop_slices
+    softcut.loop_start(2, 0)
+    softcut.loop_end(2, slice_len)
+    softcut.position(2, 0)
+    softcut.play(2, 1)
+    tape_playing = true
+  end
 end
 
 ---------- PATTERN DATA ----------
@@ -339,11 +573,49 @@ local function advance_step()
   local p = patterns[current_pattern]
   current_step = (current_step % p.length) + 1
 
-  local beat_dur = clock.get_beat_sec() / 4
-  local swing = params:get("swing") / 100
+  -- PATTERN CHAINING: auto-switch after N bars
+  if chain_mode and #chain > 0 and current_step == 1 then
+    chain_bar = chain_bar + 1
+    if chain_bar > chain[chain_pos].bars then
+      chain_bar = 1
+      chain_pos = (chain_pos % #chain) + 1
+      current_pattern = chain[chain_pos].pattern
+      p = patterns[current_pattern]
+      update_keyboard()
+    end
+  end
 
-  -- melody
-  local step = p.melody[current_step]
+  -- RUNGLER: clock the shift register
+  rungler_clock()
+
+  local beat_dur = clock.get_beat_sec() / 4
+
+  -- PATTERN MORPH: get blended step data if morph active
+  local step, raw_kick, raw_hat
+  local morph_amt = params:get("pattern_morph_amt")
+  if morph_amt > 0.01 then
+    step, raw_kick, raw_hat = get_morphed_data(current_step)
+    if not step then step = p.melody[current_step] end
+    if raw_kick == nil then raw_kick = p.kick[current_step] end
+    if raw_hat == nil then raw_hat = p.hat[current_step] end
+  else
+    step = p.melody[current_step]
+    raw_kick = p.kick[current_step]
+    raw_hat = p.hat[current_step]
+  end
+
+  -- XOR DRUMS: apply bit logic to drum patterns
+  local xor_mode = params:get("xor_mode")
+  if xor_mode > 1 then
+    raw_kick = apply_xor_logic(raw_kick, xor_shadow_kick[current_step], xor_mode)
+    raw_hat = apply_xor_logic(raw_hat, xor_shadow_hat[current_step], xor_mode)
+  end
+
+  -- RUNGLER modulation values
+  local rung_amt = params:get("rungler_amt")
+  local rung_norm = rungler_value / 255
+
+  -- ===== MELODY =====
   if step.on then
     local step_chaos = step.chaos
     local drift = params:get("note_drift")
@@ -351,15 +623,21 @@ local function advance_step()
     if total_chaos > 0 then
       engine.chaos(params:get("chaos_amt") + step_chaos)
     end
-    -- global probability scales per-step probability
     local effective_prob = step.prob * (params:get("probability") / 100)
     if math.random(100) <= effective_prob then
       local note = step.note + (params:get("octave_shift") * 12)
       local vel = step.vel
-      -- note drift: combined per-step chaos + global drift
+      local scale_notes = musicutil.generate_scale(
+        params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 5)
+
+      -- rungler note offset
+      if rung_amt > 0.01 then
+        local rung_offset = math.floor((rung_norm - 0.5) * 14 * rung_amt)
+        note = snap_to_scale(note + rung_offset, scale_notes)
+      end
+
+      -- chaos note drift
       if total_chaos > 0 and math.random() < total_chaos * 0.4 then
-        local scale_notes = musicutil.generate_scale(
-          params:get("root_note"), SCALE_NAMES[params:get("scale_type")], 5)
         local drift_amt = math.floor(total_chaos * 4)
         note = snap_to_scale(note + math.random(-drift_amt, drift_amt), scale_notes)
       end
@@ -367,33 +645,43 @@ local function advance_step()
       if total_chaos > 0 then
         vel = util.clamp(vel + (math.random() - 0.5) * total_chaos * 0.3, 0.1, 1.0)
       end
-      -- global gate length multiplier
+
+      -- rungler filter modulation
+      if rung_amt > 0.01 then
+        local cut_mod = (rung_norm - 0.5) * 6000 * rung_amt
+        engine.cutoff(util.clamp(params:get("cutoff") + cut_mod, 20, 18000))
+      end
+
       local gate = beat_dur * step.gate * 2 * params:get("gate_length")
       play_note(note, vel, gate)
     end
     if total_chaos > 0 then
       engine.chaos(params:get("chaos_amt"))
     end
+    -- restore cutoff after rungler mod
+    if rung_amt > 0.01 then
+      engine.cutoff(params:get("cutoff"))
+    end
   end
 
-  -- kick (with probability + ghost notes + fill chance)
+  -- ===== KICK =====
   local kick_prob = params:get("kick_prob")
   local kick_density = params:get("kick_density")
-  local should_kick = p.kick[current_step]
-  -- density adds ghost kicks on empty steps
+  local should_kick = raw_kick
   if not should_kick and kick_density > 0 and math.random() < kick_density * 0.3 then
+    should_kick = true
+  end
+  -- rungler ghost kicks
+  if not should_kick and rung_amt > 0.3 and rungler_register[3] == 1 then
     should_kick = true
   end
   if should_kick and math.random(100) <= kick_prob then
     local vel = (current_step % 4 == 1) and 1.0 or 0.75
-    -- ghost notes from density are quieter
-    if not p.kick[current_step] then vel = vel * 0.4 end
-    -- velocity humanize
+    if not raw_kick then vel = vel * 0.4 end
     vel = util.clamp(vel + (math.random() - 0.5) * 0.15, 0.2, 1.0)
     local vel_int = math.floor(vel * 127)
     engine.kick(vel)
     midi_note_on(36, vel_int)
-    -- OP-XY: kick on drum channel
     local opxy_drum_ch = params:get("opxy_drum_ch")
     opxy_note_on(36, vel_int, opxy_drum_ch)
     clock.run(function()
@@ -403,28 +691,28 @@ local function advance_step()
     end)
   end
 
-  -- hat (with probability + ghost notes + open/closed variation)
+  -- ===== HAT =====
   local hat_prob = params:get("hat_prob")
   local hat_density = params:get("hat_density")
-  local should_hat = p.hat[current_step]
-  -- density adds ghost hats
+  local should_hat = raw_hat
   if not should_hat and hat_density > 0 and math.random() < hat_density * 0.4 then
+    should_hat = true
+  end
+  -- rungler ghost hats
+  if not should_hat and rung_amt > 0.4 and rungler_register[6] == 1 then
     should_hat = true
   end
   if should_hat and math.random(100) <= hat_prob then
     local vel = 0.4 + math.random() * 0.2
-    if not p.hat[current_step] then vel = vel * 0.35 end
-    -- hat decay variation: sometimes open, sometimes tight
+    if not raw_hat then vel = vel * 0.35 end
     local hat_var = params:get("hat_variety")
     if hat_var > 0 and math.random() < hat_var then
-      local base_decay = params:get("hat_decay")
-      engine.hat_decay(base_decay * (0.5 + math.random() * 2.0))
+      engine.hat_decay(params:get("hat_decay") * (0.5 + math.random() * 2.0))
     end
     vel = util.clamp(vel + (math.random() - 0.5) * 0.12, 0.15, 0.8)
     local vel_int = math.floor(vel * 127)
-    engine.hat(vel_int > 50 and vel or 0.4)  -- ensure audible
+    engine.hat(vel)
     midi_note_on(42, vel_int)
-    -- OP-XY: hat on drum channel
     local opxy_drum_ch = params:get("opxy_drum_ch")
     opxy_note_on(42, vel_int, opxy_drum_ch)
     clock.run(function()
@@ -432,9 +720,20 @@ local function advance_step()
       midi_note_off(42)
       opxy_note_off(42, opxy_drum_ch)
     end)
-    -- restore hat decay if we varied it
     if hat_var > 0 then
       engine.hat_decay(params:get("hat_decay"))
+    end
+  end
+
+  -- CROSS-MOD: step-based modulations
+  apply_cross_mod()
+
+  -- tape recording length tracking
+  if tape_recording then
+    tape_rec_length = tape_rec_length + beat_dur
+    if tape_rec_length >= TAPE_BUF_SEC then
+      tape_stop_rec()
+      tape_start_play()
     end
   end
 
@@ -552,10 +851,19 @@ g.key = function(x, y, z)
 
     -- ROW 8: controls
     elseif y == 8 then
-      if x >= 1 and x <= 8 then
-        -- pattern select
-        current_pattern = x
-        update_keyboard()
+      if x == 9 then
+        -- CHAIN button
+        chain_edit_held = true
+        chain_hold_time = util.time()
+      elseif x >= 1 and x <= 8 then
+        if chain_edit_held then
+          -- append to chain
+          table.insert(chain, {pattern = x, bars = 1})
+        else
+          -- pattern select
+          current_pattern = x
+          update_keyboard()
+        end
       elseif x == 10 then
         -- euclidean track cycle
         euclid_track = (euclid_track % 3) + 1
@@ -600,6 +908,28 @@ g.key = function(x, y, z)
       end
     elseif y == 8 and x == 16 then
       chaos_release()
+    elseif y == 8 and x == 9 then
+      -- chain button release
+      chain_edit_held = false
+      local held = util.time() - chain_hold_time
+      if held > 1.0 then
+        -- long press: clear chain
+        chain = {}
+        chain_mode = false
+        chain_pos = 1
+        chain_bar = 0
+      else
+        -- short tap: toggle chain playback
+        if #chain > 0 then
+          chain_mode = not chain_mode
+          if chain_mode then
+            chain_pos = 1
+            chain_bar = 0
+            current_pattern = chain[1].pattern
+            update_keyboard()
+          end
+        end
+      end
     end
   end
 
@@ -673,8 +1003,19 @@ local function grid_redraw()
 
   -- row 8: controls
   for x = 1, 8 do
-    g:led(x, 8, x == current_pattern and 15 or 3)
+    if chain_edit_held then
+      -- show chain contents
+      local in_chain = false
+      for _, entry in ipairs(chain) do
+        if entry.pattern == x then in_chain = true; break end
+      end
+      g:led(x, 8, in_chain and 12 or 2)
+    else
+      g:led(x, 8, x == current_pattern and 15 or 3)
+    end
   end
+  -- col 9: chain button
+  g:led(9, 8, chain_mode and (#chain > 0 and 12 or 4) or (chain_edit_held and 15 or (#chain > 0 and 6 or 2)))
   -- euclidean track indicator
   g:led(10, 8, ({8, 10, 6})[euclid_track])
   g:led(11, 8, 4)  -- fills down
@@ -778,7 +1119,7 @@ end
 
 function enc(n, d)
   if n == 1 then
-    current_page = util.clamp(current_page + (d > 0 and 1 or -1), 1, 4)
+    current_page = util.clamp(current_page + (d > 0 and 1 or -1), 1, 6)
 
   elseif current_page == 1 then
     -- PLAY: E2 = tempo, E3 = MUTATE melody
@@ -843,9 +1184,56 @@ function enc(n, d)
       params:delta("delay_time", d)
     elseif n == 3 then
       params:delta("delay_fb", d)
-      -- bits follow feedback inversely — more feedback = crunchier
       local fb = params:get("delay_fb")
       params:set("delay_bits", util.clamp(16 - fb * 12, 4, 16))
+    end
+
+  elseif current_page == 5 then
+    -- TAPE: E2 = speed, E3 = position scrub / chop select
+    if n == 2 then
+      if tape_mode == 3 then
+        -- chop: E2 selects slice
+        tape_chop_sel = util.clamp(tape_chop_sel + (d > 0 and 1 or -1), 1, tape_chop_slices)
+        if tape_rec_length > 0 then
+          local slice_len = tape_rec_length / tape_chop_slices
+          local start = (tape_chop_sel - 1) * slice_len
+          softcut.loop_start(2, start)
+          softcut.loop_end(2, start + slice_len)
+          softcut.position(2, start)
+        end
+      else
+        -- normal: E2 = speed
+        params:delta("tape_speed", d)
+        if tape_playing then
+          softcut.rate(2, params:get("tape_speed"))
+        end
+      end
+    elseif n == 3 then
+      if tape_mode == 3 then
+        -- chop: E3 = number of slices
+        tape_chop_slices = util.clamp(tape_chop_slices + (d > 0 and 1 or -1), 2, 16)
+      else
+        -- scrub position
+        if tape_rec_length > 0 and tape_playing then
+          local pos = tape_phase + d * 0.2
+          pos = pos % tape_rec_length
+          softcut.position(2, pos)
+        end
+      end
+    end
+
+  elseif current_page == 6 then
+    -- MORPH: E2 = pattern morph, E3 = snapshot morph
+    if n == 2 then
+      local m = params:get("pattern_morph_amt")
+      params:set("pattern_morph_amt", util.clamp(m + d * 0.03, 0, 1))
+    elseif n == 3 then
+      if morph_snapshot then
+        local m = params:get("morph_amt")
+        local new_m = util.clamp(m + d * 0.03, 0, 1)
+        params:set("morph_amt", new_m)
+        apply_morph(new_m)
+      end
     end
   end
 
@@ -898,6 +1286,31 @@ function key(n, z)
       else
         recall_snapshot()
       end
+
+    elseif current_page == 5 then
+      -- TAPE: cycle through REC / PLAY / CHOP
+      if tape_mode == 1 then
+        -- PLAY -> REC
+        if tape_playing then tape_stop_play() end
+        tape_start_rec()
+      elseif tape_mode == 2 then
+        -- REC -> PLAY
+        tape_stop_rec()
+        tape_start_play()
+      elseif tape_mode == 3 then
+        -- CHOP -> PLAY (reset to full loop)
+        tape_stop_play()
+        if tape_rec_length > 0 then
+          softcut.loop_start(2, 0)
+          softcut.loop_end(2, tape_rec_length)
+        end
+        tape_start_play()
+      end
+
+    elseif current_page == 6 then
+      -- MORPH: capture snapshot for morphing
+      capture_morph_snapshot()
+      screen_dirty = true
     end
   end
   screen_dirty = true
@@ -918,6 +1331,10 @@ function redraw()
     draw_chaos_page()
   elseif current_page == 4 then
     draw_fx_page()
+  elseif current_page == 5 then
+    draw_tape_page()
+  elseif current_page == 6 then
+    draw_morph_page()
   end
 
   -- chaos particles overlay
@@ -1138,15 +1555,35 @@ function draw_chaos_page()
   screen.move(60, 44)
   screen.text("k:" .. string.format("%.0f", kd * 100) .. "% h:" .. string.format("%.0f", hd * 100) .. "%")
 
+  -- rungler register
+  local rung = params:get("rungler_amt")
+  if rung > 0.01 then
+    screen.level(8)
+    screen.move(0, 50)
+    screen.text("RUNG")
+    for i = 1, 8 do
+      screen.level(rungler_register[i] == 1 and 15 or 2)
+      screen.rect(28 + (i-1) * 7, 45, 5, 5)
+      screen.fill()
+    end
+  end
+
+  -- XOR drums mode
+  local xm = params:get("xor_mode")
+  if xm > 1 then
+    screen.level(10)
+    screen.move(90, 50)
+    screen.text(XOR_NAMES[xm])
+  end
+
   -- drop/build indicator
   screen.level(drop_active and 15 or 3)
-  screen.move(0, 56)
-  screen.text(drop_active and "K3: RELEASE!" or "K3: drop")
+  screen.move(0, 60)
+  screen.text(drop_active and "K3:RELEASE!" or "K3:drop")
 
-  -- autopilot
   if autopilot_on then
     screen.level(15)
-    screen.move(80, 56)
+    screen.move(80, 60)
     screen.text("AUTO")
   end
 end
@@ -1186,6 +1623,156 @@ function draw_fx_page()
     if x < 128 and h > 0 then
       screen.rect(x, 58 - h, 2, h)
       screen.fill()
+    end
+  end
+end
+
+---------- TAPE PAGE ----------
+
+function draw_tape_page()
+  screen.level(15)
+  screen.font_size(8)
+  screen.move(0, 7)
+  screen.text("TAPE")
+
+  -- mode indicator
+  screen.level(tape_recording and 15 or (tape_playing and 10 or 4))
+  screen.move(40, 7)
+  screen.text(TAPE_MODES[tape_mode])
+  if tape_recording then
+    screen.level(math.floor(util.time() * 4) % 2 == 0 and 15 or 0)
+    screen.rect(34, 1, 4, 4)
+    screen.fill()
+  end
+
+  -- speed
+  screen.level(7)
+  screen.move(0, 18)
+  if tape_mode == 3 then
+    screen.text("slice " .. tape_chop_sel .. "/" .. tape_chop_slices)
+  else
+    screen.text("spd " .. string.format("%.2fx", params:get("tape_speed")))
+  end
+
+  -- tape buffer visualization
+  screen.level(2)
+  screen.rect(0, 22, 128, 28)
+  screen.stroke()
+
+  -- recorded region
+  if tape_rec_length > 0 then
+    local rec_w = math.floor((tape_rec_length / TAPE_BUF_SEC) * 126)
+    screen.level(3)
+    screen.rect(1, 23, rec_w, 26)
+    screen.fill()
+
+    -- chop slices
+    if tape_mode == 3 then
+      local slice_w = rec_w / tape_chop_slices
+      for i = 1, tape_chop_slices do
+        local sx = 1 + (i - 1) * slice_w
+        screen.level(i == tape_chop_sel and 12 or 1)
+        screen.rect(math.floor(sx), 23, math.floor(slice_w) - 1, 26)
+        screen.fill()
+      end
+    end
+
+    -- playback position
+    if tape_playing then
+      local pos_x = 1 + (tape_phase / TAPE_BUF_SEC) * 126
+      screen.level(15)
+      screen.move(math.floor(pos_x), 22)
+      screen.line(math.floor(pos_x), 50)
+      screen.stroke()
+    end
+  else
+    screen.level(3)
+    screen.move(30, 38)
+    screen.text("K3: start rec")
+  end
+
+  -- wow/flutter
+  screen.level(5)
+  screen.move(0, 58)
+  screen.text("wow:" .. string.format("%.1f", params:get("tape_wow")))
+  screen.move(50, 58)
+  screen.text("flut:" .. string.format("%.1f", params:get("tape_flutter")))
+  screen.move(100, 58)
+  screen.text("mix:" .. string.format("%.1f", params:get("tape_mix")))
+end
+
+---------- MORPH PAGE ----------
+
+function draw_morph_page()
+  screen.level(15)
+  screen.font_size(8)
+  screen.move(0, 7)
+  screen.text("MORPH")
+
+  -- pattern morph
+  local pm = params:get("pattern_morph_amt")
+  screen.level(7)
+  screen.move(0, 18)
+  screen.text("E2: pattern " .. pattern_morph_a .. ">" .. pattern_morph_b)
+  -- morph bar
+  screen.level(3)
+  screen.rect(0, 21, 100, 6)
+  screen.stroke()
+  screen.level(pm > 0.01 and 12 or 4)
+  screen.rect(1, 22, math.floor(pm * 98), 4)
+  screen.fill()
+  screen.level(7)
+  screen.move(104, 26)
+  screen.text(string.format("%.0f%%", pm * 100))
+
+  -- snapshot morph
+  local sm = params:get("morph_amt")
+  screen.level(7)
+  screen.move(0, 36)
+  screen.text("E3: snapshot")
+  if morph_snapshot then
+    screen.level(3)
+    screen.rect(0, 39, 100, 6)
+    screen.stroke()
+    screen.level(sm > 0.01 and 10 or 4)
+    screen.rect(1, 40, math.floor(sm * 98), 4)
+    screen.fill()
+    screen.level(7)
+    screen.move(104, 44)
+    screen.text(string.format("%.0f%%", sm * 100))
+  else
+    screen.level(3)
+    screen.move(60, 44)
+    screen.text("K3: capture")
+  end
+
+  -- cross-mod mini display
+  screen.level(5)
+  screen.move(0, 54)
+  screen.text("XMOD")
+  local xmod_params = {"xmod_lfo1_lfo2", "xmod_step_cutoff", "xmod_note_delay", "xmod_chaos_pan"}
+  local xmod_labels = {"L>L", "S>C", "N>D", "C>P"}
+  for i, pk in ipairs(xmod_params) do
+    local x = 30 + (i - 1) * 25
+    local val = params:get(pk)
+    screen.level(val > 0.01 and 8 or 2)
+    screen.rect(x, 52, math.floor(val * 20), 4)
+    screen.fill()
+    screen.level(4)
+    screen.move(x, 62)
+    screen.text(xmod_labels[i])
+  end
+
+  -- chain display
+  if #chain > 0 then
+    screen.level(5)
+    screen.move(0, 62)
+    screen.text("ch:")
+    for i, entry in ipairs(chain) do
+      if i > 8 then break end
+      screen.level(chain_mode and i == chain_pos and 15 or 4)
+      screen.move(16 + (i - 1) * 8, 62)
+      screen.text(entry.pattern)
     end
   end
 end
@@ -1237,6 +1824,9 @@ local function autopilot_evolve()
     params:set("cutoff", util.clamp(params:get("cutoff") + 200 + math.random(200), 200, 12000))
     params:set("chaos_amt", util.clamp(params:get("chaos_amt") + 0.03, 0, 0.7))
     params:set("hat_density", util.clamp(params:get("hat_density") + 0.04, 0, 0.7))
+    -- BUILD: rungler rises, cross-mod step>cutoff begins
+    params:set("rungler_amt", util.clamp(params:get("rungler_amt") + 0.03, 0, 0.5))
+    params:set("xmod_step_cutoff", util.clamp(params:get("xmod_step_cutoff") + 0.02, 0, 0.4))
 
   elseif phase == 2 then
     -- PEAK: high energy, glitch moments, waveform surprises
@@ -1259,6 +1849,15 @@ local function autopilot_evolve()
     -- occasional waveform switch
     if math.random() < 0.15 then
       params:set("waveform", math.random(1, 4))
+    end
+    -- PEAK: rungler at max, XOR drums switch, cross-mod surges
+    params:set("rungler_amt", util.clamp(params:get("rungler_amt") + 0.05, 0, 0.8))
+    if math.random() < 0.2 then
+      params:set("xor_mode", math.random(1, 5))
+      update_xor_shadows()
+    end
+    if math.random() < 0.3 then
+      params:set("xmod_lfo1_lfo2", math.random() * 0.6)
     end
 
   elseif phase == 3 then
@@ -1285,6 +1884,16 @@ local function autopilot_evolve()
       p.hat[i] = false
     end
     params:set("hat_density", util.clamp(params:get("hat_density") - 0.05, 0, 0.7))
+    -- DECONSTRUCT: tape effects rise, XOR to NAND
+    params:set("tape_wow", util.clamp(params:get("tape_wow") + 0.05, 0, 0.6))
+    params:set("tape_flutter", util.clamp(params:get("tape_flutter") + 0.03, 0, 0.4))
+    if autopilot_tick == 2 and tape_rec_length > 0 then
+      tape_start_play()
+      params:set("tape_mix", 0.3)
+    end
+    if math.random() < 0.15 then
+      params:set("xor_mode", 5)  -- NAND thins drums
+    end
 
   elseif phase == 4 then
     -- MINIMAL/SPACE: sparse, deep, breathing room
@@ -1307,7 +1916,21 @@ local function autopilot_evolve()
     -- kick pattern simplify
     if math.random() < 0.2 then
       local i = math.random(1, p.length)
-      if i % 4 ~= 1 then p.kick[i] = false end  -- keep the 1s
+      if i % 4 ~= 1 then p.kick[i] = false end
+    end
+    -- SPACE: rungler fades, tape slows, cross-mod decays, XOR off
+    params:set("rungler_amt", util.clamp(params:get("rungler_amt") - 0.05, 0, 1))
+    params:set("xmod_step_cutoff", util.clamp(params:get("xmod_step_cutoff") - 0.03, 0, 1))
+    params:set("xmod_lfo1_lfo2", util.clamp(params:get("xmod_lfo1_lfo2") - 0.04, 0, 1))
+    params:set("tape_wow", util.clamp(params:get("tape_wow") - 0.03, 0, 1))
+    params:set("tape_flutter", util.clamp(params:get("tape_flutter") - 0.02, 0, 1))
+    if tape_playing then
+      local sp = params:get("tape_speed")
+      params:set("tape_speed", util.clamp(sp * 0.9, 0.1, 2))
+      softcut.rate(2, params:get("tape_speed"))
+    end
+    if autopilot_tick > 6 then
+      params:set("xor_mode", 1)  -- XOR off
     end
   end
 
@@ -1500,7 +2123,7 @@ function init()
   params:set_action("env_release", function(x) engine.release(x) end)
 
   -- chaos
-  params:add_group("CHAOS", 3)
+  params:add_group("CHAOS", 5)
   params:add_control("chaos_amt", "chaos",
     controlspec.new(0, 1, 'lin', 0.01, 0))
   params:set_action("chaos_amt", function(x) engine.chaos(x) end)
@@ -1510,9 +2133,12 @@ function init()
   params:add_control("lfo2_rate", "lfo2 rate",
     controlspec.new(0.01, 20, 'exp', 0.01, 0.3, "hz"))
   params:set_action("lfo2_rate", function(x) engine.lfo2_rate(x) end)
+  params:add_control("rungler_amt", "rungler",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_option("rungler_clock_div", "rungler div", {"1", "2", "4", "8"}, 1)
 
   -- drums
-  params:add_group("DRUMS", 8)
+  params:add_group("DRUMS", 11)
   params:add_control("kick_tune", "kick tune",
     controlspec.new(30, 200, 'exp', 1, 60, "hz"))
   params:set_action("kick_tune", function(x) engine.kick_tune(x) end)
@@ -1530,6 +2156,12 @@ function init()
     controlspec.new(0, 1, 'lin', 0.01, 0.25))
   params:add_control("hat_variety", "hat variety",
     controlspec.new(0, 1, 'lin', 0.01, 0.3))
+  params:add_option("xor_mode", "XOR drums", XOR_NAMES, 1)
+  params:set_action("xor_mode", function() update_xor_shadows() end)
+  params:add_number("xor_kick_fills", "XOR kick fills", 0, 16, 5)
+  params:set_action("xor_kick_fills", function() update_xor_shadows() end)
+  params:add_number("xor_hat_fills", "XOR hat fills", 0, 16, 7)
+  params:set_action("xor_hat_fills", function() update_xor_shadows() end)
 
   -- fx
   params:add_group("FX", 6)
@@ -1574,14 +2206,100 @@ function init()
   params:add_number("opxy_melody_ch", "OP-XY melody ch", 1, 16, 1)
   params:add_number("opxy_drum_ch", "OP-XY drum ch", 1, 16, 10)
 
+  -- tape
+  params:add_group("TAPE", 4)
+  params:add_control("tape_speed", "tape speed",
+    controlspec.new(-2, 2, 'lin', 0.01, 1, "x"))
+  params:add_control("tape_wow", "tape wow",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_control("tape_flutter", "tape flutter",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_control("tape_mix", "tape mix",
+    controlspec.new(0, 1, 'lin', 0.01, 0.5))
+
+  -- morph
+  params:add_group("MORPH", 2)
+  params:add_control("pattern_morph_amt", "pattern morph",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_control("morph_amt", "snapshot morph",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+
+  -- cross-mod
+  params:add_group("CROSS-MOD", 4)
+  params:add_control("xmod_lfo1_lfo2", "LFO1>LFO2",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_control("xmod_step_cutoff", "STEP>CUT",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_control("xmod_note_delay", "NOTE>DLY",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+  params:add_control("xmod_chaos_pan", "CHAOS>PAN",
+    controlspec.new(0, 1, 'lin', 0.01, 0))
+
   -- init keyboard
   update_keyboard()
+
+  -- init xor shadows
+  update_xor_shadows()
+
+  -- SOFTCUT: tape setup
+  audio.level_eng_cut(1)  -- route engine output to softcut input
+  softcut.buffer_clear()
+  -- voice 1: recorder
+  softcut.enable(1, 1)
+  softcut.buffer(1, 1)
+  softcut.level(1, 0)
+  softcut.rate(1, 1)
+  softcut.loop(1, 0)
+  softcut.position(1, 0)
+  softcut.rec_level(1, 1)
+  softcut.pre_level(1, 0)
+  softcut.level_input_cut(1, 1, 1)
+  softcut.level_input_cut(2, 1, 1)
+  softcut.rec(1, 0)
+  softcut.play(1, 0)
+  softcut.fade_time(1, 0.01)
+  -- voice 2: playback
+  softcut.enable(2, 1)
+  softcut.buffer(2, 1)
+  softcut.level(2, 1)
+  softcut.rate(2, 1)
+  softcut.loop(2, 1)
+  softcut.loop_start(2, 0)
+  softcut.loop_end(2, TAPE_BUF_SEC)
+  softcut.position(2, 0)
+  softcut.rec(2, 0)
+  softcut.play(2, 0)
+  softcut.fade_time(2, 0.01)
+  softcut.rate_slew_time(2, 0.1)
+  softcut.level_slew_time(2, 0.05)
+  -- phase polling
+  softcut.phase_quant(2, 0.05)
+  softcut.event_phase(function(voice, pos)
+    if voice == 2 then tape_phase = pos end
+  end)
+  softcut.poll_start_phase()
 
   -- screen refresh metro
   screen_metro = metro.init()
   screen_metro.event = function()
     update_particles()
-    opxy_sync_params()  -- keep OP-XY CCs in sync
+    opxy_sync_params()
+    -- tape wow/flutter
+    if tape_playing then
+      local wow = params:get("tape_wow")
+      local flutter = params:get("tape_flutter")
+      local speed = params:get("tape_speed")
+      if wow > 0.01 or flutter > 0.01 then
+        local wow_mod = math.sin(util.time() * 0.5) * wow * 0.15
+        local flutter_mod = math.sin(util.time() * 12) * flutter * 0.05
+        softcut.rate(2, speed + wow_mod + flutter_mod)
+      end
+      softcut.level(2, params:get("tape_mix"))
+    end
+    -- continuous cross-mod (LFO1>LFO2 and CHAOS>PAN)
+    if params:get("xmod_lfo1_lfo2") > 0.01 or params:get("xmod_chaos_pan") > 0.01 then
+      apply_cross_mod()
+    end
     if screen_dirty then
       redraw()
       screen_dirty = false
@@ -1625,4 +2343,10 @@ function cleanup()
       end
     end
   end
+  -- softcut cleanup
+  softcut.rec(1, 0)
+  softcut.play(1, 0)
+  softcut.play(2, 0)
+  softcut.buffer_clear()
+  softcut.poll_stop_phase()
 end

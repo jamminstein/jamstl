@@ -447,5 +447,157 @@ return {
       range_hi = 0.9,
       euclidean_pulses = 3,
     },
+
+    ---------- RUNGLER (kastle shift register chaos) ----------
+
+    -- rungler depth: 0 = off, 0.7 = full chaos. drives note/filter/drum modulation.
+    rungler_amt = {
+      group = "melodic",
+      weight = 0.8,
+      sensitivity = 0.6,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.7,
+      euclidean_pulses = 5,
+    },
+
+    ---------- XOR DRUMS (bitranger bit logic) ----------
+
+    -- XOR mode: changes emergent drum patterns. high impact.
+    xor_mode = {
+      group = "structural",
+      weight = 0.4,
+      sensitivity = 0.3,
+      direction = "both",
+      range_lo = 1,
+      range_hi = 5,
+      euclidean_pulses = 3,
+    },
+
+    xor_kick_fills = {
+      group = "rhythmic",
+      weight = 0.5,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 2,
+      range_hi = 12,
+      euclidean_pulses = 5,
+    },
+
+    xor_hat_fills = {
+      group = "rhythmic",
+      weight = 0.5,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 3,
+      range_hi = 13,
+      euclidean_pulses = 7,
+    },
+
+    ---------- TAPE (bastl thyme mangling) ----------
+
+    tape_speed = {
+      group = "structural",
+      weight = 0.6,
+      sensitivity = 0.5,
+      direction = "both",
+      range_lo = -1.5,
+      range_hi = 1.5,
+      euclidean_pulses = 3,
+    },
+
+    tape_wow = {
+      group = "timbral",
+      weight = 0.4,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.5,
+      euclidean_pulses = 5,
+    },
+
+    tape_flutter = {
+      group = "timbral",
+      weight = 0.3,
+      sensitivity = 0.3,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.4,
+      euclidean_pulses = 7,
+    },
+
+    tape_mix = {
+      group = "structural",
+      weight = 0.5,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.7,
+      euclidean_pulses = 3,
+    },
+
+    ---------- MORPH ----------
+
+    pattern_morph_amt = {
+      group = "structural",
+      weight = 0.6,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.9,
+      euclidean_pulses = 3,
+    },
+
+    morph_amt = {
+      group = "structural",
+      weight = 0.7,
+      sensitivity = 0.5,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.9,
+      euclidean_pulses = 5,
+    },
+
+    ---------- CROSS-MODULATION (softpop self-patching) ----------
+
+    xmod_lfo1_lfo2 = {
+      group = "melodic",
+      weight = 0.5,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.6,
+      euclidean_pulses = 5,
+    },
+
+    xmod_step_cutoff = {
+      group = "melodic",
+      weight = 0.5,
+      sensitivity = 0.4,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.5,
+      euclidean_pulses = 3,
+    },
+
+    xmod_note_delay = {
+      group = "melodic",
+      weight = 0.4,
+      sensitivity = 0.3,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.5,
+      euclidean_pulses = 5,
+    },
+
+    xmod_chaos_pan = {
+      group = "timbral",
+      weight = 0.5,
+      sensitivity = 0.5,
+      direction = "both",
+      range_lo = 0,
+      range_hi = 0.6,
+      euclidean_pulses = 7,
+    },
   },
 }
