@@ -56,6 +56,9 @@ Engine_Jamstl : CroneEngine {
         params[\kickFreq] = 60;
         params[\kickDecay] = 0.3;
         params[\hatDecay] = 0.08;
+        params[\snareFreq] = 180;
+        params[\snareDecay] = 0.18;
+        params[\snareTone] = 0.5;
 
         // ======== SYNTHDEFS ========
 
@@ -124,6 +127,25 @@ Engine_Jamstl : CroneEngine {
             env = EnvGen.kr(Env.perc(0.003, decay), doneAction: Done.freeSelf);
             sig = (sig * env * amp).tanh;
             sig = sig.round(2.pow(-7));
+            Out.ar(out, sig ! 2);
+        }).add;
+
+        // --- Snare drum (crunchy digital snare) ---
+        SynthDef(\kastl_snare, {
+            arg out, freq=180, amp=0.7, decay=0.18, tone=0.5;
+            var body, noise, sig, env;
+            // body: pitched sine with quick pitch drop
+            body = SinOsc.ar(freq + (EnvGen.kr(Env.perc(0.001, 0.04)) * freq * 3));
+            body = body * EnvGen.kr(Env.perc(0.001, decay * 0.6));
+            // noise: filtered white noise for the snap
+            noise = WhiteNoise.ar;
+            noise = BPF.ar(noise, 3000 + (tone * 5000), 0.6);
+            noise = noise * EnvGen.kr(Env.perc(0.003, decay));
+            // mix body and noise
+            sig = (body * tone) + (noise * (1 - tone * 0.3));
+            env = EnvGen.kr(Env.perc(0.001, decay * 1.2), doneAction: Done.freeSelf);
+            sig = (sig * env * amp).tanh;
+            sig = sig.round(2.pow(-6));
             Out.ar(out, sig ! 2);
         }).add;
 
@@ -219,6 +241,14 @@ Engine_Jamstl : CroneEngine {
             ], pg);
         });
 
+        this.addCommand("snare", "f", { arg msg;
+            Synth(\kastl_snare, [
+                \out, fxBus, \freq, params[\snareFreq],
+                \amp, msg[1].asFloat, \decay, params[\snareDecay],
+                \tone, params[\snareTone]
+            ], pg);
+        });
+
         // --- sound params ---
         this.addCommand("wave", "i", { arg msg; params[\wave] = msg[1].asInteger; });
         this.addCommand("pw", "f", { arg msg;
@@ -271,6 +301,9 @@ Engine_Jamstl : CroneEngine {
         this.addCommand("kick_tune", "f", { arg msg; params[\kickFreq] = msg[1].asFloat; });
         this.addCommand("kick_decay", "f", { arg msg; params[\kickDecay] = msg[1].asFloat; });
         this.addCommand("hat_decay", "f", { arg msg; params[\hatDecay] = msg[1].asFloat; });
+        this.addCommand("snare_tune", "f", { arg msg; params[\snareFreq] = msg[1].asFloat; });
+        this.addCommand("snare_decay", "f", { arg msg; params[\snareDecay] = msg[1].asFloat; });
+        this.addCommand("snare_tone", "f", { arg msg; params[\snareTone] = msg[1].asFloat; });
 
         // --- fx params ---
         this.addCommand("delay_time", "f", { arg msg; delaySynth.set(\time, msg[1].asFloat); });

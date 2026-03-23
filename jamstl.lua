@@ -383,7 +383,7 @@ local function save_patterns()
   }
   for i = 1, NUM_PATTERNS do
     local p = patterns[i]
-    local pd = {melody = {}, kick = {}, hat = {}, length = p.length}
+    local pd = {melody = {}, kick = {}, snare = {}, hat = {}, length = p.length}
     for j = 1, NUM_STEPS do
       pd.melody[j] = {
         on = p.melody[j].on,
@@ -635,16 +635,17 @@ local function new_step()
 end
 
 local function new_pattern()
-  local p = {melody = {}, kick = {}, hat = {}, length = 16}
+  local p = {melody = {}, kick = {}, snare = {}, hat = {}, length = 16}
   for i = 1, NUM_STEPS do
     p.melody[i] = new_step()
     p.kick[i] = false
+    p.snare[i] = false
     p.hat[i] = false
   end
   return p
 end
 
-local function set_pattern(idx, notes, on_steps, vels, chaos_steps, kick, hat)
+local function set_pattern(idx, notes, on_steps, vels, chaos_steps, kick, snare, hat)
   local p = patterns[idx]
   for i = 1, 16 do
     p.melody[i].note = notes[i] or 60
@@ -655,6 +656,7 @@ local function set_pattern(idx, notes, on_steps, vels, chaos_steps, kick, hat)
   end
   for i = 1, 16 do
     p.kick[i] = kick[i] == 1
+    p.snare[i] = (snare and snare[i] == 1) or false
     p.hat[i] = hat[i] == 1
   end
 end
@@ -671,69 +673,70 @@ local function init_default_patterns()
     {1., .5, .8, .6, .5, .9, .5, .7, 1., .5, .8, .5, .7, .4, .3, .6},
     {0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  .3, 0,  .3, .5, 0},
     {1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  1,  0},
+    {0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0},
     {0,  0,  1,  0,  1,  0,  1,  1,  0,  0,  1,  0,  1,  1,  0,  1})
 
-  -- P2: ACID — 303-style, heavy on the one, ghost notes, rolling hats
   set_pattern(2,
     {48, 48, 60, 51, 53, 48, 60, 55, 48, 51, 63, 60, 53, 48, 55, 51},
     {1,  1,  1,  0,  1,  1,  0,  1,  1,  0,  1,  1,  0,  1,  0,  1},
     {1., .4, .9, .3, .6, 1., .3, .7, .9, .3, .8, .5, .4, 1., .3, .5},
     {0,  0,  0,  0,  .4, 0,  0,  .3, 0,  0,  0,  .5, 0,  0,  .6, 0},
     {1,  0,  0,  0,  1,  0,  1,  0,  0,  0,  1,  0,  1,  0,  0,  1},
+    {0,  0,  1,  0,  0,  0,  1,  0,  0,  0,  1,  0,  0,  0,  0,  1},
     {1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1})
 
-  -- P3: BROKEN — irregular kick, sparse hat, chromatic stabs
   set_pattern(3,
     {63, 66, 60, 68, 61, 65, 63, 70, 60, 67, 64, 72, 63, 61, 68, 60},
     {1,  0,  0,  1,  0,  1,  0,  0,  1,  0,  0,  1,  0,  1,  0,  0},
     {1., .5, .3, .9, .4, .7, .3, .5, 1., .4, .3, .8, .5, .6, .4, .3},
     {.3, 0,  0,  .5, 0,  .4, 0,  0,  .3, 0,  0,  .6, 0,  .5, 0,  0},
     {1,  0,  0,  0,  0,  0,  1,  0,  0,  1,  0,  0,  0,  0,  1,  0},
+    {0,  0,  0,  0,  1,  0,  0,  1,  0,  0,  0,  0,  1,  0,  1,  0},
     {0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  0,  1})
 
-  -- P4: MINIMAL — sparse, heavy spaces, low notes
   set_pattern(4,
     {48, 48, 55, 48, 48, 53, 48, 48, 48, 55, 48, 48, 53, 48, 48, 48},
     {1,  0,  0,  0,  0,  0,  1,  0,  0,  0,  1,  0,  0,  0,  0,  0},
     {1., .3, .3, .3, .3, .3, .8, .3, .3, .3, .7, .3, .3, .3, .3, .3},
     {0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0},
     {1,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0},
+    {0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0},
     {0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0})
 
-  -- P5: POLYRHYTHM — 3-over-4 kick, euclidean hat, ascending melody
   set_pattern(5,
     {60, 62, 63, 65, 67, 68, 70, 72, 70, 68, 67, 65, 63, 62, 60, 58},
     {1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0},
     {.9, .4, .7, .4, .8, .4, .7, .4, .9, .4, .7, .4, .8, .4, .7, .4},
     {0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  .3, .3, .4, .5},
     {1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  1,  0,  0,  0},
+    {0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  1},
     {1,  0,  0,  1,  0,  1,  0,  0,  1,  0,  1,  0,  0,  1,  0,  1})
 
-  -- P6: BASTL CHAOS — everything on, high chaos, dense and glitchy
   set_pattern(6,
     {72, 60, 75, 63, 70, 58, 67, 65, 73, 61, 68, 60, 72, 63, 67, 70},
     {1,  1,  1,  1,  1,  0,  1,  1,  1,  1,  0,  1,  1,  1,  1,  0},
     {.8, .6, .9, .5, .7, .3, .8, .6, .9, .5, .3, .7, .8, .6, .9, .4},
     {.5, .3, .6, .4, .7, 0,  .5, .3, .8, .4, 0,  .6, .5, .4, .7, 0},
     {1,  0,  1,  0,  1,  0,  0,  1,  0,  1,  0,  1,  0,  0,  1,  0},
+    {0,  0,  1,  0,  1,  0,  0,  1,  0,  1,  0,  0,  1,  0,  1,  0},
     {1,  1,  0,  1,  1,  0,  1,  0,  1,  1,  0,  1,  0,  1,  1,  0})
 
-  -- P7: HALFTIME — slow heavy, kick on 1 and 9, snappy hats
   set_pattern(7,
     {48, 48, 55, 53, 48, 48, 51, 48, 48, 55, 53, 51, 48, 48, 51, 53},
     {1,  0,  0,  0,  1,  0,  0,  0,  1,  0,  0,  0,  1,  0,  0,  1},
     {1., .3, .3, .3, .8, .3, .3, .3, 1., .3, .3, .3, .7, .3, .3, .6},
     {0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  .3, 0,  .4, .5},
     {1,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0},
+    {0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0},
     {0,  0,  0,  0,  1,  0,  1,  0,  0,  0,  0,  0,  1,  0,  1,  0})
 
-  -- P8: FILL — dense 16th fills, all drums, high energy transition
   set_pattern(8,
     {72, 70, 67, 65, 63, 60, 63, 65, 67, 70, 72, 75, 72, 70, 67, 65},
     {1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1},
     {.6, .5, .7, .5, .8, .5, .6, .5, .7, .5, .8, .6, .9, .7, 1., .8},
     {.2, .2, .3, .2, .3, .2, .3, .3, .4, .3, .4, .4, .5, .5, .6, .7},
     {1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  1,  1,  1},
+    {0,  1,  0,  1,  1,  0,  1,  0,  0,  1,  0,  1,  1,  1,  1,  1},
     {0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  1,  1,  1,  1})
 end
 
@@ -810,8 +813,12 @@ local function randomize_all_patterns()
 
     local kick_e = euclidean(16, kt.fills, kt.offset + math.random(0, 3))
     local hat_e = euclidean(16, ht.fills, ht.offset + math.random(0, 3))
+    -- snare: typically 2-4 hits, backbeat-ish
+    local snare_fills = ({2, 2, 3, 3, 4, 2, 3, 4})[math.random(1, 8)]
+    local snare_e = euclidean(16, snare_fills, math.random(2, 6))
     for j = 1, 16 do
       p.kick[j] = kick_e[j] or false
+      p.snare[j] = snare_e[j] or false
       p.hat[j] = hat_e[j] or false
     end
 
@@ -830,7 +837,7 @@ local function save_to_slot(slot)
   local data = {patterns = {}, current_pattern = current_pattern, chain = chain}
   for i = 1, NUM_PATTERNS do
     local p = patterns[i]
-    local pd = {melody = {}, kick = {}, hat = {}, length = p.length}
+    local pd = {melody = {}, kick = {}, snare = {}, hat = {}, length = p.length}
     for j = 1, NUM_STEPS do
       pd.melody[j] = {
         on = p.melody[j].on, note = p.melody[j].note, vel = p.melody[j].vel,
@@ -1180,6 +1187,26 @@ local function advance_step()
       opxy_note_off(36, opxy_drum_ch)
     end)
     kick_played = true
+  end
+
+  -- ===== SNARE =====
+  local snare_played = false
+  local p_ref = patterns[current_pattern]
+  local raw_snare = p_ref.snare and p_ref.snare[current_step]
+  if raw_snare and not in_silence then
+    local vel = 0.7 + math.random() * 0.2
+    vel = util.clamp(vel + (math.random() - 0.5) * 0.15, 0.3, 1.0)
+    local vel_int = math.floor(vel * 127)
+    engine.snare(vel)
+    midi_note_on(38, vel_int)
+    local opxy_drum_ch = params:get("opxy_drum_ch")
+    opxy_note_on(38, vel_int, opxy_drum_ch)
+    clock.run(function()
+      clock.sleep(0.05)
+      midi_note_off(38)
+      opxy_note_off(38, opxy_drum_ch)
+    end)
+    snare_played = true
   end
 
   -- ===== HAT =====
@@ -2969,7 +2996,7 @@ function init()
   params:add_option("rungler_clock_div", "rungler div", {"1", "2", "4", "8"}, 1)
 
   -- drums
-  params:add_group("DRUMS", 11)
+  params:add_group("DRUMS", 14)
   params:add_control("kick_tune", "kick tune",
     controlspec.new(30, 200, 'exp', 1, 60, "hz"))
   params:set_action("kick_tune", function(x) engine.kick_tune(x) end)
@@ -2979,6 +3006,15 @@ function init()
   params:add_control("hat_decay", "hat decay",
     controlspec.new(0.01, 0.5, 'exp', 0.01, 0.08, "s"))
   params:set_action("hat_decay", function(x) engine.hat_decay(x) end)
+  params:add_control("snare_tune", "snare tune",
+    controlspec.new(80, 400, 'exp', 1, 180, "hz"))
+  params:set_action("snare_tune", function(x) engine.snare_tune(x) end)
+  params:add_control("snare_decay", "snare decay",
+    controlspec.new(0.05, 0.5, 'exp', 0.01, 0.18, "s"))
+  params:set_action("snare_decay", function(x) engine.snare_decay(x) end)
+  params:add_control("snare_tone", "snare tone",
+    controlspec.new(0, 1, 'lin', 0.01, 0.5))
+  params:set_action("snare_tone", function(x) engine.snare_tone(x) end)
   params:add_number("kick_prob", "kick probability", 0, 100, 100)
   params:add_number("hat_prob", "hat probability", 0, 100, 100)
   params:add_control("kick_density", "kick ghost density",
