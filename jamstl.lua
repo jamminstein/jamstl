@@ -1938,16 +1938,23 @@ function draw_play_page()
   screen.move(32, 44)
   screen.text(SCALE_DISPLAY[params:get("scale_type")])
   screen.move(64, 44)
-  if brain.in_silence then
-    screen.level(math.floor(util.time() * 3) % 2 == 0 and 12 or 0)
-    screen.text("BREATH")
-  elseif brain.responding and autopilot_on then
-    screen.level(10)
-    local resp_names = {"INV","RET","TR4","AUG"}
-    screen.text(resp_names[brain.response_type] or "RESP")
-  elseif autopilot_on then
-    screen.level(6)
-    screen.text(brain.phrase_mode)
+  if playing then
+    -- always show brain state when playing
+    if brain.in_silence then
+      screen.level(math.floor(util.time() * 3) % 2 == 0 and 12 or 0)
+      screen.text("BREATH")
+    elseif brain.responding and autopilot_on then
+      screen.level(10)
+      local resp_names = {"INV","RET","TR4","AUG"}
+      screen.text(resp_names[brain.response_type] or "RESP")
+    else
+      screen.level(brain.phrase_mode == "climax" and 12 or 6)
+      screen.text(brain.phrase_mode)
+    end
+    -- activity meters
+    screen.level(3)
+    screen.move(110, 44)
+    screen.text("m" .. string.format("%.0f", brain.melody_activity * 100))
   else
     screen.level(4)
     screen.text("E3:mutate")
